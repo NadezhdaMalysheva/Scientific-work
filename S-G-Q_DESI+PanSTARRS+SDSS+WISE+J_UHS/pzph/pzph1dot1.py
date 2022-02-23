@@ -58,7 +58,7 @@ def file_exists(path):
     return os.path.isfile(path) and os.stat(path).st_size > 0
 
 
-def parse_cli_args(args):
+def parse_cli_args():
     def check_args(args):
         return True
 
@@ -383,6 +383,13 @@ def parse_cli_args(args):
                         default=default_value,
                         help=_add_default_and_type(argument_description,
                                                    arg_type, default_value))
+    
+    argument_description = "The value of magnitude shift." 
+    arg_type = float
+    default_value = 0.0
+    parser.add_argument('--dm', type=arg_type, default=default_value,
+                        help=_add_default_and_type(argument_description,
+                                                   arg_type, default_value))
     #
     # argument_description = "Casjobs user ID (not username!)"
     # arg_type = str
@@ -438,21 +445,23 @@ def parse_cli_args(args):
                         help=_add_default_and_type(argument_description,
                                                    arg_type, default_value))
 
-    return parser.parse_args(args)
+    return parser.parse_args()
 
-
+# Args for Nadya
 class Catalog:
     def __init__(self, xray_data_path=None, xray_radec_cols=('RA_', 'DEC_'),
-                 base_catalog='ls',
-                 base_radec_cols=('ra', 'dec'), sdss_path=None, ps_path=None,
+                 base_catalog='ps',#'ls',
+                 base_radec_cols=('raBest', 'decBest'),#('ra', 'dec'),
+                 sdss_path=None, ps_path=None,
                  ls_path=None, sdss_on=None, ps_on=None,
                  ls_on=None, assembled_dataset_path=None, output_dir=None,
-                 primary_radius=30, secondary_rasius=1,
-                 getaroundr_path=None, njobs=1, cj_user_id=None,
+                 primary_radius=1.0, secondary_rasius=1,
+                 getaroundr_path='/home/horungev/Catalogs/SRG/crossmatch/getaroundr.py',
+                 njobs=1, cj_user_id=None,
                  cj_password=None, filename='features_gz.pkl',
                  ps_fluxes_manually=False, ps_fluxes=None,
                  user_defined_features_transformation=lambda x: x,
-                 panstarrs_catalog_to_use_cause_my_bullshit_code_and_noone_to_download_the_entire_panstarrs_properly_once_and_forall='ps2oldfluxradecbest'):
+                 panstarrs_catalog_to_use_cause_my_bullshit_code_and_noone_to_download_the_entire_panstarrs_properly_once_and_forall='ps2fluxbest'):#'ps2oldfluxradecbest'):
         """
         Class to assemble catalog
         """
@@ -935,7 +944,7 @@ class Catalog:
 
         # print(format_message('Done'))
 
-    def prepare_features(self):
+    def prepare_features(self, augmentation=False):
         if self.assembled_dataset is None:
             self.assembled_dataset = pd.read_pickle(
                 self.assembled_dataset_path, compression='gzip')
@@ -947,7 +956,7 @@ class Catalog:
 
         self.assembled_dataset = calculate_features_on_full_catalog(
             self.assembled_dataset, ebv_accounting=False, wise_forced=wise_forced,
-            user_defined_features_transformation=self.user_definded_features_transformation)
+            user_defined_features_transformation=self.user_definded_features_transformation, augmentation=augmentation)
 
         # Raises type error if dataset contains predictions pdfs
         # self.assembled_dataset = self.assembled_dataset.replace(
@@ -974,8 +983,10 @@ class Catalog:
                                                    f'{self.filename}.features.gz_pkl')
         self.assembled_dataset.to_pickle(self.assembled_dataset_path,
                                          compression='gzip', protocol=4)
+        return self.assembled_dataset
 
     def prepare_data(self):
+        print(f'Use_case = {self.use_case}')
         if self.use_case <= 0 or self.use_case is None:
             return None
 
@@ -1264,8 +1275,130 @@ class Catalog:
 
         return process_counterparts(conf, data, njobs)
 
+#     Добавляю класс для чтения получения предсказания от моделей ближайших соседей для аугментации данных.
+#     Также была изменена функция asinhmag_dm для автоматического поаторения распределения.
+#     На данный момент примение динамического радиуса не дало ожидаемых приимуществ, тк величины в различных диапазонах,
+#     для которых необходимо подбирать свои константы. К тому же динамический подбор радиуса и получение предсказания
+#     для каждого отдельного объекта занимает значительное время.
 
-def asinhmag_dm(flux, flux_err=None, flux_ivar=None, dm=0):
+
+# Обязательные импорты для класса
+import random
+from sklearn.neighbors import KNeighborsRegressor, RadiusNeighborsRegressor
+import pickle
+
+from enum import Enum
+     
+class AugmType(Enum):
+    """
+    Type of implementetion augm models
+    """
+    KNN = 1
+    RNN = 2 # not implemented
+    MIX = 3
+
+class KNN_Augmentation:
+    """
+    Model for augmentation error of flax
+    ::X: list[float] - train flax
+    ::y: list[float] - train error
+    ::type_model: AugmType 
+    Components of model:
+    ::knn: KNeighborsRegressor 
+    ::rnn: RadiusNeighborsRegressor
+    """     
+    attr_name = ['X', 'y', 'type_model', 'knn', 'rnn', 'normalize', 'n_neighbors']
+    def _train_model(self):
+        # На данном этапе должно быть проверно, что X и y в правильных величинах.
+        if self.type_model.value % 2:
+            self.knn = KNeighborsRegressor(n_neighbors).fit(X, y) 
+        if self.type_model.value > 1:
+            self.rnn = RadiusNeighborsRegressor().fit(X, y)
+            self.normalize = 0.2 * np.max(self.X) / 100
+        return self
+        
+
+    def __init__(self, X=None, y=None, type_model=AugmType.KNN, n_neighbors=5, model_path=None, path_to_save=None): #tp.Optional[str]
+        self.X = X
+        self.y = y
+        # None
+        self.n_neighbors = n_neighbors
+        self.type_model = type_model
+        if model_path is None:
+            self = self._train_model()
+            if not (path_to_save is None):
+                with open(path_to_save + type_model.name, 'wb') as file:
+                    pickle.dump(self, file) 
+        else:
+            path = model_path
+            if not (model_path[-3:] in [i.name for i in AugmType]):
+                path =model_path + type_model.name
+            with open(path, 'rb') as file:
+                model = pickle.load(file)
+                for i in self.attr_name:
+                    if hasattr(model, i):
+                        setattr(self, i, getattr(model, i))
+            
+
+    def neighbors(self, x_input, n_neighbors=None, radius=None, sigma=1e-9):
+        print(f'Hi! I\'m neighbors of {x_input}')
+        x = x_input
+        if isinstance(x_input, float) or isinstance(x_input, int):
+            x = np.array([x])
+        x = np.array(x, dtype=float)
+        good_rows = ~(np.isnan(x) + np.isinf(x))
+        res = np.zeros(x.shape)
+#         print(f'res {res}')
+        if not(n_neighbors is None):
+            self.n_neighbors = n_neighbors
+ 
+        if self.type_model == AugmType.KNN:
+            assert self.n_neighbors > 0
+            knb = self.knn.kneighbors(x[good_rows].reshape(-1, 1), 
+                                      n_neighbors=self.n_neighbors, 
+                                      return_distance=False)
+            print('knn')
+            res_tmp = []
+            for x_loc, n, i in zip(x[good_rows], knb, range(len(knb))):
+                res_tmp.append(np.random.choice(self.y[n][:, 0]))
+            res[good_rows] = np.array(res_tmp)
+                
+        elif self.type_model == AugmType.RNN:
+            pass
+
+        elif self.type_model == AugmType.MIX:
+            assert self.n_neighbors > 0
+            for x_loc, s, i in zip(x[good_rows], sigma, range(np.sum(good_rows))): # самая долгая часть - причина, почему обычные соседи могут быть лучше
+                if radius is None:
+                    r = np.max([0.2*x_loc, 3*s]) / self.normalize
+                else:
+                    r = radius
+                rnb = self.rnn.radius_neighbors(x_loc.reshape(-1, 1), radius=r, return_distance=False)[0]
+                if len(rnb) < self.n_neighbors:
+                    knb = self.knn.kneighbors(x_loc.reshape(-1, 1), n_neighbors=self.n_neighbors, return_distance=False)[0]
+                    res[good_rows][i] = np.random.choice(self.y[knb][:, 0])
+                else:
+                    res[good_rows][i] = np.random.choice(self.y[rnb][:, 0])
+
+        else:
+            res = None
+#         print(f'res {res}')
+        return res
+
+def plotik(x, y, name=''):
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    f, ax = plt.subplots(nrows = 1, ncols=1, figsize=(12, 8), sharex=True, sharey = True)
+    ax.set_title(name) 
+#     ax.set_xlabel(x)
+#     ax.set_ylabel(y)
+    ax.set_xlim([-1000, 30000])
+    ax.set_ylim([-10, 400])
+    ax.scatter(x, y, c='r')
+    f.savefig('plt/'+name+'.png')
+
+
+def asinhmag_dm(flux, flux_err=None, flux_ivar=None, dm=0, path_to_model=None):
     """
     Calculate asinh mognitude with dm shift.
     ::flux      - flux in [nanomaggies]
@@ -1273,22 +1406,56 @@ def asinhmag_dm(flux, flux_err=None, flux_ivar=None, dm=0):
     ::flux_err  - flux error in [nanomaggies]
     ::dm        - magnitude shift
     """
+    print('asinhmag_dm')
+    
+    def gauss_flux(inputs):
+        mu, err = inputs
+        sigma = np.sqrt(err ** 2 + (mu * 0.03) ** 2)
+        return np.random.normal(mu, sigma)
+    
+    def read_model(path_to_model):
+        model = KNN_Augmentation(model_path=path_to_model, type_model=AugmType.KNN)
+        print('read model knn')
+        return model
+      
     assert (flux_err is not None) ^ (
                 flux_ivar is not None), 'specify only flux_err or flux_ivar'
-    f = flux / 1e9 * np.power(10, 0.4 * dm)
+    f = flux * np.power(10, 0.4 * dm)
+    
     if flux_ivar is not None:
-        b = np.power(flux_ivar, -0.5) / 1e9 * np.power(10, 0.4 * dm)
+        b = np.power(flux_ivar, -0.5)
     else:
-        b = flux_err / 1e9 * np.power(10, 0.4 * dm)
-
-    f, b = f.astype(np.float64), b.astype(
-        np.float64)  # otherwise type error like
-    # TypeError: loop of ufunc does not support argument 0 of type numpy.float64 which has no callable arcsinh method
+        b = flux_err
+    
+    if not (path_to_model is None):
+        plotik(f / np.power(10, 0.4 * dm), b, flux.name + 'before')
+        model = read_model(path_to_model)
+        print(model.type_model)
+        b = model.neighbors(f.values, sigma=b)
+        plotik(f, b, flux.name + 'after_tmp')
+        #Разыгрываем поток
+        f = np.array(list(map(gauss_flux, zip(f, b))))
+        plotik(f, b, flux.name + 'after')
+        
+    f, b = f.astype(np.float64) / 1e9 , b.astype(np.float64) / 1e9  # otherwise type error like
 
     return (np.arcsinh(f / (2 * b)) + np.log(b)) * (-2.5 / np.log(10))
+#     assert (flux_err is not None) ^ (
+#                 flux_ivar is not None), 'specify only flux_err or flux_ivar'
+#     f = flux / 1e9 * np.power(10, 0.4 * dm)
+#     if flux_ivar is not None:
+#         b = np.power(flux_ivar, -0.5) / 1e9 * np.power(10, 0.4 * dm)
+#     else:
+#         b = flux_err / 1e9 * np.power(10, 0.4 * dm)
+
+#     f, b = f.astype(np.float64), b.astype(
+#         np.float64)  # otherwise type error like
+#     # TypeError: loop of ufunc does not support argument 0 of type numpy.float64 which has no callable arcsinh method
+
+#     return (np.arcsinh(f / (2 * b)) + np.log(b)) * (-2.5 / np.log(10))
 
 
-def flux2mag(flux, err, columns, dms=None):
+def flux2mag(flux, err, columns, dms=None, augmentation=False):
     """
     ::flux - pandas.DataFrame with fluxes
     ::err - pandas.DataFrame with corresponding errors. Columns must be in the same order
@@ -1305,23 +1472,31 @@ def flux2mag(flux, err, columns, dms=None):
     for f, i, dm in zip(flux.columns, err.columns, dms):
         if dm is None:
             dm = 0
+            
+        print('DM for', f, '=', dm)
+            
+        if not augmentation:
+            path_to_model = None
+        else:
+            path_to_model = f"/home/nmalysheva/task/S-G-Q_DESI+PanSTARRS+SDSS+WISE+J_UHS/pzph/aug_models/{f}"
 
         if 'ivar' in i or 'Ivar' in i:
             print(i, 'ivar')
-            result[columns[f]] = asinhmag_dm(flux[f], flux_ivar=err[i], dm=dm)
+            result[columns[f]] = asinhmag_dm(flux[f], flux_ivar=err[i], dm=dm, path_to_model=path_to_model)
         elif re.findall('^ps_dw\dflux_ab$', i):
             print(i, 'err')
             result[columns[f]] = asinhmag_dm(
                 flux[f].replace(-999, np.NaN),
                 flux_err=err[i].replace(-999, np.NaN),
-                dm=dm
+                dm=dm, path_to_model=path_to_model
             )
         else:
             print(i, 'err')
             result[columns[f]] = asinhmag_dm(
                 flux[f].replace(-999, np.NaN) / 3621e-9,
                 flux_err=err[i].replace(-999, np.NaN) / 3621e-9,
-                dm=dm
+                dm=dm,
+                path_to_model=path_to_model
             )
 
     result.index = flux.index
@@ -1393,7 +1568,7 @@ def calculate_decals8tr_features(df):
 
 
 def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
-                                               wise_forced=False):
+                                               wise_forced=False, augmentation=False):
     sdss_flux_columns = [
         'psfFlux_u', 'psfFluxIvar_u', 'psfFlux_g',
         'psfFluxIvar_g', 'psfFlux_r', 'psfFluxIvar_r', 'psfFlux_i',
@@ -1412,7 +1587,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
 
     fluxes, errors = catalog[sdss_flux_columns], catalog[sdss_error_columns]
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, sdss_mag_columns)
+    mags = flux2mag(fluxes, errors, sdss_mag_columns, augmentation=augmentation)
     catalog[mags.columns] = mags
 
     psdr2_flux_columns = [
@@ -1436,7 +1611,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
 
     fluxes, errors = catalog[psdr2_flux_columns], catalog[psdr2_error_columns]
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, psdr2_mag_columns)
+    mags = flux2mag(fluxes, errors, psdr2_mag_columns, augmentation=augmentation)
     mags = missing_kron_to_psf(mags)
     catalog[mags.columns] = mags
 
@@ -1464,7 +1639,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
     fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
         ivar_cols].astype(np.float)
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, mag_columns)
+    mags = flux2mag(fluxes, errors, mag_columns, augmentation=augmentation)
     catalog[mags.columns] = mags
 
     if wise_forced:
@@ -1496,7 +1671,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
             err_cols].astype(np.float)
 
         errors[errors <= 0] = np.nan
-        mags = flux2mag(fluxes, errors, mag_columns)
+        mags = flux2mag(fluxes, errors, mag_columns, augmentation=augmentation)
         catalog[mags.columns] = mags
 
     catalog = calculate_standard_features(  # SDSS features
@@ -1518,7 +1693,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
 
 
 def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
-                                                   wise_forced=False):
+                                                   wise_forced=False, augmentation=False):
     sdss_flux_columns = [
         'psfFlux_u', 'psfFluxIvar_u', 'psfFlux_g',
         'psfFluxIvar_g', 'psfFlux_r', 'psfFluxIvar_r', 'psfFlux_i',
@@ -1550,7 +1725,7 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
     ]
     fluxes, errors = catalog[sdss_flux_columns], catalog[sdss_error_columns]
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, sdss_mag_columns, dms)
+    mags = flux2mag(fluxes, errors, sdss_mag_columns, dms, augmentation=augmentation)
     catalog[mags.columns] = mags
 
     psdr2_flux_columns = [
@@ -1586,7 +1761,7 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
     ]
     fluxes, errors = catalog[psdr2_flux_columns], catalog[psdr2_error_columns]
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, psdr2_mag_columns, dms)
+    mags = flux2mag(fluxes, errors, psdr2_mag_columns, dms, augmentation=augmentation)
     mags = missing_kron_to_psf(mags)
     catalog[mags.columns] = mags
 
@@ -1614,7 +1789,7 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
     fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
         ivar_cols].astype(np.float)
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, mag_columns)
+    mags = flux2mag(fluxes, errors, mag_columns, augmentation=augmentation)
     catalog[mags.columns] = mags
     print(catalog['decals8tr_Lw1'])
 
@@ -1651,7 +1826,166 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
         # fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
         #     err_cols].astype(np.float)
         errors[errors <= 0] = np.nan
-        mags = flux2mag(fluxes, errors, mag_columns, dms)
+        mags = flux2mag(fluxes, errors, mag_columns, dms, augmentation=augmentation)
+        print(mags['decals8tr_Lw1'])
+        catalog[mags.columns] = mags
+
+    print(catalog['decals8tr_Lw1'])
+
+    # print(mags['decals8tr_Lw1'])
+
+    catalog = calculate_standard_features(  # SDSS features
+        catalog,
+        passbands='ugriz',
+        mag_types=['psf', 'cmodel'],
+        mags_fmt='sdssdr16_{pb}_{typ}',
+        prefix='sdssdr16_'
+    )
+    catalog = calculate_standard_features(  # PSDR2 features
+        catalog,
+        passbands='grizy',
+        mag_types=['psf', 'kron'],
+        mags_fmt='psdr2_{pb}_{typ}',
+        prefix='psdr2_'
+    )
+    catalog = calculate_decals8tr_features(catalog)
+    return catalog
+
+
+def _calculate_features_on_full_catalog_castom_dms(catalog: pd.DataFrame,
+                                                   wise_forced=False,
+                                                   DMs=None,
+                                                   augmentation=False):
+    sdss_flux_columns = [
+        'psfFlux_u', 'psfFluxIvar_u', 'psfFlux_g',
+        'psfFluxIvar_g', 'psfFlux_r', 'psfFluxIvar_r', 'psfFlux_i',
+        'psfFluxIvar_i', 'psfFlux_z', 'psfFluxIvar_z', 'cModelFlux_u',
+        'cModelFluxIvar_u', 'cModelFlux_g', 'cModelFluxIvar_g', 'cModelFlux_r',
+        'cModelFluxIvar_r', 'cModelFlux_i', 'cModelFluxIvar_i', 'cModelFlux_z',
+        'cModelFluxIvar_z'
+    ]
+    sdss_flux_columns = ['sdss_' + col for col in sdss_flux_columns]
+    sdss_flux_columns, sdss_error_columns = sdss_flux_columns[
+                                            ::2], sdss_flux_columns[1::2]
+    sdss_mag_columns = {
+        **{f'sdss_psfFlux_{pb}': f'sdssdr16_{pb}_psf' for pb in 'ugriz'},
+        **{f'sdss_cModelFlux_{pb}': f'sdssdr16_{pb}_cmodel' for pb in 'ugriz'},
+    }
+    
+    if isinstance(DMs, dict):
+        dms = [DMs[flux_name] for flux_name in sdss_flux_columns]
+    elif isinstance(DMs, float) or isinstance(DMs, int):
+        dms = [DMs]*len(sdss_flux_columns)
+    else:
+        dms = None
+    
+    fluxes, errors = catalog[sdss_flux_columns], catalog[sdss_error_columns]
+    errors[errors <= 0] = np.nan
+    mags = flux2mag(fluxes, errors, sdss_mag_columns, dms, augmentation=augmentation)
+    catalog[mags.columns] = mags
+
+    psdr2_flux_columns = [
+        'gKronFluxErr',
+        'gKronFlux', 'rKronFluxErr', 'rKronFlux',
+        'iKronFluxErr', 'iKronFlux',
+        'zKronFluxErr', 'zKronFlux',
+        'yKronFluxErr', 'yKronFlux',
+        'gPSFFluxErr', 'gPSFFlux', 'rPSFFluxErr',
+        'rPSFFlux', 'iPSFFluxErr', 'iPSFFlux',
+        'zPSFFluxErr', 'zPSFFlux', 'yPSFFluxErr',
+        'yPSFFlux'
+    ]
+    psdr2_flux_columns = ['ps_' + col for col in psdr2_flux_columns]
+    psdr2_flux_columns, psdr2_error_columns = psdr2_flux_columns[
+                                              1::2], psdr2_flux_columns[::2]
+    psdr2_mag_columns = {
+        **{f'ps_{pb}PSFFlux': f'psdr2_{pb}_psf' for pb in 'grizy'},
+        **{f'ps_{pb}KronFlux': f'psdr2_{pb}_kron' for pb in 'grizy'},
+    }
+    
+    if isinstance(DMs, dict):
+        dms = [DMs[flux_name] for flux_name in psdr2_flux_columns]
+    elif isinstance(DMs, float) or isinstance(DMs, int):
+        dms = [DMs]*len(psdr2_flux_columns)
+    else:
+        dms = None
+        
+    fluxes, errors = catalog[psdr2_flux_columns], catalog[psdr2_error_columns]
+    errors[errors <= 0] = np.nan
+    mags = flux2mag(fluxes, errors, psdr2_mag_columns, dms, augmentation=augmentation)
+    mags = missing_kron_to_psf(mags)
+    catalog[mags.columns] = mags
+
+    flux_cols = [
+        'flux_g_ebv', 'flux_r_ebv', 'flux_z_ebv',
+        'flux_w1_ebv', 'flux_w2_ebv', 'flux_w3_ebv', 'flux_w4_ebv'
+    ]
+    flux_cols = ['ls_' + col for col in flux_cols]
+    ivar_cols = [
+        'flux_ivar_g', 'flux_ivar_r', 'flux_ivar_z',
+        'flux_ivar_w1', 'flux_ivar_w2', 'flux_ivar_w3', 'flux_ivar_w4'
+    ]
+    ivar_cols = ['ls_' + col for col in ivar_cols]
+    mag_columns = {
+        **{f'ls_flux_{pb}_ebv': f'decals8tr_{pb}' for pb in 'grz'},
+        **{f'ls_flux_w{pb}_ebv': f'decals8tr_Lw{pb}' for pb in '1234'},
+    }
+
+    for pb in ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']:
+        fcol = f'ls_flux_{pb}'
+        fcol_new = f'ls_flux_{pb}_ebv'
+        mwcol = f'ls_mw_transmission_{pb}'
+        catalog[fcol_new] = catalog[fcol] / catalog[mwcol]
+
+    fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
+        ivar_cols].astype(np.float)
+    errors[errors <= 0] = np.nan
+    
+    if isinstance(DMs, dict):
+        dms = [DMs[flux_name] for flux_name in flux_cols]
+    elif isinstance(DMs, float) or isinstance(DMs, int):
+        dms = [DMs]*len(flux_cols)
+    else:
+        dms = None
+    mags = flux2mag(fluxes, errors, mag_columns, dms, augmentation=augmentation)
+    catalog[mags.columns] = mags
+
+    if wise_forced:
+        print("CALCULATING WISE FORCED")
+        # catalog[['ps_w1flux', 'ps_dw1flux']] *= 10 ** (-2.699 / 2.5)
+        # catalog[['ps_w2flux', 'ps_dw2flux']] *= 10 ** (-3.339 / 2.5)
+        #
+        # flux_cols = ['ps_w1flux', 'ps_w2flux']
+        # err_cols = ['ps_dw1flux', 'ps_dw2flux']
+        # mag_columns = {'ps_w1flux': 'decals8tr_Lw1',
+        #                'ps_w2flux': 'decals8tr_Lw2'}
+
+        catalog[['ps_w1flux_ab', 'ps_dw1flux_ab']] = catalog[['ps_w1flux',
+                                                              'ps_dw1flux']] * 10 ** (
+                                                                 -2.699 / 2.5)
+        catalog[['ps_w2flux_ab', 'ps_dw2flux_ab']] = catalog[['ps_w2flux',
+                                                              'ps_dw2flux']] * 10 ** (
+                                                                 -3.339 / 2.5)
+
+        flux_cols = ['ps_w1flux_ab', 'ps_w2flux_ab']
+        err_cols = ['ps_dw1flux_ab', 'ps_dw2flux_ab']
+        mag_columns = {'ps_w1flux_ab': 'decals8tr_Lw1',
+                       'ps_w2flux_ab': 'decals8tr_Lw2'}
+
+        fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
+            err_cols].astype(np.float)
+
+        if isinstance(DMs, dict):
+            dms = [DMs[flux_name] for flux_name in flux_cols]
+        elif isinstance(DMs, float) or isinstance(DMs, int):
+            dms = [DMs]*len(flux_cols)
+        else:
+            dms = None
+        # print(dms)
+        # fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
+        #     err_cols].astype(np.float)
+        errors[errors <= 0] = np.nan
+        mags = flux2mag(fluxes, errors, mag_columns, dms, augmentation=augmentation)
         print(mags['decals8tr_Lw1'])
         catalog[mags.columns] = mags
 
@@ -1679,17 +2013,21 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
 
 def calculate_features_on_full_catalog(data: pd.DataFrame, ebv_accounting=True,
                                        wise_forced=False,
-                                       user_defined_features_transformation=lambda x: x):
+                                       user_defined_features_transformation=lambda x: x,
+                                       augmentation=False, dms=None):
 
     data = user_defined_features_transformation(data)
 
     print(format_message(ebv_accounting))
-    if ebv_accounting:
+    if not(dms is None):
+        dst =  _calculate_features_on_full_catalog_castom_dms(data,
+                                                        wise_forced=wise_forced, augmentation=augmentation, DMs=dms)
+    elif ebv_accounting:
         dst = _calculate_features_on_full_catalog_ebv_helper(data,
-                                                            wise_forced=wise_forced)
+                                                            wise_forced=wise_forced, augmentation=augmentation)
     else:
         dst = _calculate_features_on_full_catalog_helper(data,
-                                                        wise_forced=wise_forced)
+                                                        wise_forced=wise_forced, augmentation=augmentation)
 
     return dst
 
@@ -1927,9 +2265,144 @@ def calculate_lx(features, predictions, zmax_col_prefix):
     return data
 
 
-def predict(datasets_files, models_path, models: dict, config,
-            wise_forced=False, keep_in_memory=False, njobs=1,
+def predict(datasets_files, modelsIds=None, modelsSeries="x0pswf", customModels=None,
+            useWiseForced=False, keep_in_memory=False, njobs=1,
             user_defined_features_transformation=lambda x: x):
+#                     files2predict, args.modelsIds, args.customModels, args.useWiseForced,
+#                     njobs=args.njobs, keep_in_memory=args.keepModelsInMemory,
+#                     user_defined_features_transformation=user_defined_features_transformation
+    print('kwargs in predict', datasets_files, modelsIds, modelsSeries, customModels,
+            useWiseForced, keep_in_memory, njobs,
+            user_defined_features_transformation)
+    assert not (modelsIds is None), "Empty modelsIds!"
+#     Добавляю основные преобразования над данными, подбором моделей сюда, чтобы разгрузить main,
+#     сделать функцию более самостоятельной
+    try:
+        data_path = os.environ['PZPH1_DATA_PATH']
+        print(format_message(f'Found PZPH1_DATA_PATH env variable: {data_path}'))
+
+    except KeyError:
+        data_path = '/data/SRGz/pzph1/'
+        print(format_message(
+            f'Not found PZPH1_DATA_PATH env variable. Using default path: {data_path}'))
+
+    models_path = os.path.join(data_path, 'models')
+
+    models_series = {
+        'x0': {
+            'path': os.path.join(models_path, 'x0'),
+            'models': {
+                # 15: 'sdssdr16_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',  # there is not sdss wise in getaroundr
+                19: 'psdr2+wise_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+                21: 'psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+                22: 'deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+                35: 'sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+            },
+            'config': {
+                'perturb': 0,
+                'ebv_accounting': False,
+            },
+        },
+        'x0pswf': {
+            'path': os.path.join(models_path, 'x0'),
+            'models': {
+                19: 'psdr2+wise_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+                21: 'psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+                22: 'deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+                35: 'sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+            },
+            'config': {
+                'perturb': 0,
+                'ebv_accounting': False,
+                'use_wise_forced': True,
+            },
+        },
+        "x1": {
+            "path": os.path.join(models_path, 'x1'),
+            "models": {
+                "18": "sdssdr16+wise_deacls8tr_QSO+GALAXY_20201212141009",
+                "19": "psdr2+wise_deacls8tr_QSO+GALAXY_20201212135046",
+                "20": "sdssdr16+all_deacls8tr_QSO+GALAXY_20201212143658",
+                "21": "psdr2+all_deacls8tr_QSO+GALAXY_20201212142333",
+                "22": "deacls8tr_QSO+GALAXY_20201212135641",
+                "34": "sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201212131454",
+                "35": "sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY_20201212133711"
+            },
+            "config": {
+                "perturb": 8,
+                "ebv_accounting": True
+            }
+        },
+        "x1a": {
+            "path": os.path.join(models_path, 'x1'),
+            "models": {
+                "18": "sdssdr16+wise_deacls8tr_QSO+GALAXY_20201212141009",
+                "19": "psdr2+wise_deacls8tr_QSO+GALAXY_20201212135046",
+                "20": "sdssdr16+all_deacls8tr_QSO+GALAXY_20201212143658",
+                "21": "psdr2+all_deacls8tr_QSO+GALAXY_20201212142333",
+                "22": "deacls8tr_QSO+GALAXY_20201212135641",
+                "34": "sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201212131454",
+                "35": "sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY_20201212133711"
+            },
+            "config": {
+                "perturb": 0,
+                "ebv_accounting": True
+            }
+        },
+        'gal0': {
+            'path': os.path.join(models_path, 'gal0'),
+            'models': {
+                # 15: 'sdssdr16_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+                19: 'psdr2+wise_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+                21: 'psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+                22: 'deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+                # 34: 'sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201004092833',
+                35: 'sdssdr16+psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+            },
+            'config': {
+                'perturb': 7,
+                'ebv_accounting': False,
+            }
+        },
+        'gal0pswf': {
+            'path': os.path.join(models_path, 'gal0'),
+            'models': {
+                # 15: 'sdssdr16_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+                19: 'psdr2+wise_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+                21: 'psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+                22: 'deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+                # 34: 'sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201004092833',
+                35: 'sdssdr16+psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+            },
+            'config': {
+                'perturb': 7,
+                'ebv_accounting': False,
+                'use_wise_forced': True,
+            }
+        }
+    }
+    
+    if customModels is not None:
+        with open(customModels, 'r') as fin:
+            custom_models_series = json.load(fin)
+
+        models_series = {**models_series, **custom_models_series}
+
+    print(models_series[modelsSeries])
+
+    models_path = models_series[modelsSeries]['path']
+    models = {f'{modelsSeries}{mid}': model for mid, model in ############
+              models_series[modelsSeries]['models'].items()
+              if int(mid) in modelsIds}
+    config = models_series[modelsSeries]['config']
+    
+    try:
+        use_wise_forced = config['use_wise_forced']
+    except KeyError:
+        use_wise_forced = False
+
+    print(format_message("Use WISE forced = "), use_wise_forced, 'or', useWiseForced)
+    wise_forced = use_wise_forced or useWiseForced
     print('HHHHHEEEEEEEYYYYYYY')
 
     models_data = defaultdict(dict)
@@ -1942,9 +2415,11 @@ def predict(datasets_files, models_path, models: dict, config,
             regr_path) if keep_in_memory else regr_path
         models_data[mid]['feats'] = _load_obj(
             features_path) if keep_in_memory else features_path
-
+        
+    if isinstance(datasets_files, str):
+        datasets_files = [datasets_files]
+        
     for ds_path in tqdm.tqdm(datasets_files, desc="Predictions"):
-        print('HHHHHEEEEEEEYYYYYYY')
 
         fname, ext = os.path.splitext(ds_path)
         fname = os.path.splitext(fname)[0]
@@ -1952,6 +2427,7 @@ def predict(datasets_files, models_path, models: dict, config,
         need_to_pertrub = False
         for mid in models_data.keys():
             pdfs_dst_file = f'{fname}.pdfs.{mid}{ext}'
+            print(pdfs_dst_file)
             if not file_exists(pdfs_dst_file):
                 need_to_pertrub = True
                 break
@@ -1965,72 +2441,77 @@ def predict(datasets_files, models_path, models: dict, config,
 
         test_data['__tempid__'] = test_data.index.copy()
         num = config['perturb']
+        dp_dst_file = f'{fname}.dp.cf{ext}'
+        if not file_exists(dp_dst_file):
+            if need_to_pertrub and num:
+                pcorr = 0.5
+                corrmode = 1
 
-        if need_to_pertrub and num:
-            pcorr = 0.5
-            corrmode = 1
+                flux_cols = [[f'sdss_psfFlux_{pb}', f'sdss_cModelFlux_{pb}', pcorr]
+                             for pb in
+                             ['u', 'g', 'r', 'i', 'z']]
+                err_cols = [[f'sdss_psfFluxIvar_{pb}', f'sdss_cModelFluxIvar_{pb}']
+                            for pb in ['u', 'g', 'r', 'i', 'z']]
+                err_types = [['ivar', 'ivar'] for _ in ['u', 'g', 'r', 'i', 'z']]
 
-            flux_cols = [[f'sdss_psfFlux_{pb}', f'sdss_cModelFlux_{pb}', pcorr]
-                         for pb in
-                         ['u', 'g', 'r', 'i', 'z']]
-            err_cols = [[f'sdss_psfFluxIvar_{pb}', f'sdss_cModelFluxIvar_{pb}']
-                        for pb in ['u', 'g', 'r', 'i', 'z']]
-            err_types = [['ivar', 'ivar'] for _ in ['u', 'g', 'r', 'i', 'z']]
+                flux_cols += [[f'ps_{pb}PSFFlux', f'ps_{pb}KronFlux', pcorr] for pb
+                              in ['g', 'r', 'i', 'z', 'y']]
+                err_cols += [[f'ps_{pb}PSFFluxErr', f'ps_{pb}KronFluxErr'] for pb
+                             in ['g', 'r', 'i', 'z', 'y']]
+                err_types += [['err', 'err'] for _ in ['g', 'r', 'i', 'z', 'y']]
 
-            flux_cols += [[f'ps_{pb}PSFFlux', f'ps_{pb}KronFlux', pcorr] for pb
-                          in ['g', 'r', 'i', 'z', 'y']]
-            err_cols += [[f'ps_{pb}PSFFluxErr', f'ps_{pb}KronFluxErr'] for pb
-                         in ['g', 'r', 'i', 'z', 'y']]
-            err_types += [['err', 'err'] for _ in ['g', 'r', 'i', 'z', 'y']]
+                flux_cols += [f'ls_flux_{pb}' for pb in
+                              ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']]
+                err_cols += [f'ls_flux_ivar_{pb}' for pb in
+                             ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']]
+                err_types += ['ivar' for _ in
+                              ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']]
 
-            flux_cols += [f'ls_flux_{pb}' for pb in
-                          ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']]
-            err_cols += [f'ls_flux_ivar_{pb}' for pb in
-                         ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']]
-            err_types += ['ivar' for _ in
-                          ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']]
+                flux_cols += ['ps_w1flux', 'ps_w2flux']
+                err_cols += ['ps_dw1flux', 'ps_dw2flux']
+                err_types += ['err', 'err']
 
-            flux_cols += ['ps_w1flux', 'ps_w2flux']
-            err_cols += ['ps_dw1flux', 'ps_dw2flux']
-            err_types += ['err', 'err']
+                gaia_fluxes = [f'gaiaedr3_phot_{pb}_mean_flux' for pb in ['g', 'bp', 'rp']]
+                flux_cols += gaia_fluxes
+                err_cols += [flux + '_error' for flux in gaia_fluxes]
+                err_types += ['err'] * len(gaia_fluxes)
 
-            gaia_fluxes = [f'gaiaedr3_phot_{pb}_mean_flux' for pb in ['g', 'bp', 'rp']]
-            flux_cols += gaia_fluxes
-            err_cols += [flux + '_error' for flux in gaia_fluxes]
-            err_types += ['err'] * len(gaia_fluxes)
+                with multiprocessing.Pool(min(len(test_data), njobs)) as p:
+                    helper_func = functools.partial(
+                        pertrub, flux_cols=flux_cols, err_cols=err_cols,
+                        err_types=err_types, n=num, corrmode=corrmode,
+                    )
+                    data_perturbed = pd.concat(
+                        tqdm.tqdm(p.imap(helper_func, test_data.copy().iterrows()),
+                                  total=len(test_data),
+                                  desc='Perturbations', leave=True))
 
-            with multiprocessing.Pool(min(len(test_data), njobs)) as p:
-                helper_func = functools.partial(
-                    pertrub, flux_cols=flux_cols, err_cols=err_cols,
-                    err_types=err_types, n=num, corrmode=corrmode,
-                )
-                data_perturbed = pd.concat(
-                    tqdm.tqdm(p.imap(helper_func, test_data.copy().iterrows()),
-                              total=len(test_data),
-                              desc='Perturbations', leave=True))
+                additional_ls_columns = ['__tempid__', 'ls_ebv'] + [
+                    f'ls_mw_transmission_{pb}'
+                    for pb in ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']]
+                data_perturbed = pd.merge(data_perturbed,
+                                          test_data[additional_ls_columns],
+                                          right_on='__tempid__', left_index=True)
+                # print('HHHHHEEEEEEEYYYYYYY')
+                # debug_path = '/data/victor/srgz_prod/pzphlib_testing/XXLNtest/test0001results/debug-00000.gz_pkl'
+                # data_perturbed.to_pickle(debug_path, compression='gzip', protocol=4)
+                # print("USER DEFINDE CHECK", 'HereMyColumn' in data_perturbed.columns)
+                # print(data_perturbed.columns)
+            else:
+                data_perturbed = test_data
+                data_perturbed['__perturbed__'] = 0
 
-            additional_ls_columns = ['__tempid__', 'ls_ebv'] + [
-                f'ls_mw_transmission_{pb}'
-                for pb in ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']]
-            data_perturbed = pd.merge(data_perturbed,
-                                      test_data[additional_ls_columns],
-                                      right_on='__tempid__', left_index=True)
-            # print('HHHHHEEEEEEEYYYYYYY')
-            # debug_path = '/data/victor/srgz_prod/pzphlib_testing/XXLNtest/test0001results/debug-00000.gz_pkl'
-            # data_perturbed.to_pickle(debug_path, compression='gzip', protocol=4)
-            # print("USER DEFINDE CHECK", 'HereMyColumn' in data_perturbed.columns)
-            # print(data_perturbed.columns)
+            data_perturbed = calculate_features_on_full_catalog(
+                data_perturbed, ebv_accounting=config['ebv_accounting'],
+                wise_forced=wise_forced,
+                user_defined_features_transformation=user_defined_features_transformation)
+
+            data_perturbed = data_perturbed.replace([-np.inf, np.inf], np.nan)
+            print('SAVE')
+            data_perturbed.to_pickle(dp_dst_file, compression='gzip')#, protocol=4)
         else:
-            data_perturbed = test_data
-            data_perturbed['__perturbed__'] = 0
-
-        data_perturbed = calculate_features_on_full_catalog(
-            data_perturbed, ebv_accounting=config['ebv_accounting'],
-            wise_forced=wise_forced,
-            user_defined_features_transformation=user_defined_features_transformation)
-
-        data_perturbed = data_perturbed.replace([-np.inf, np.inf], np.nan)
-        # print('HHHHHEEEEEEEYYYYYYY')
+            data_perturbed = pd.read_pickle(dp_dst_file, compression='gzip')#, protocol=4)
+        
         for mid, model_data in tqdm.tqdm(models_data.items()):
             used_regr = False
             pdfs_dst_file = f'{fname}.pdfs.{mid}{ext}'
@@ -2057,17 +2538,31 @@ def predict(datasets_files, models_path, models: dict, config,
                     regr = _load_obj(model_data['regr'])
                     # feats = _load_obj(model_data['feats'])
 
-                mask = np.arange(len(regr.estimators_)) % (num + 1)
-                z_pdf = list(np.array(
-                    [tree.predict(test_data_notna.loc[test_data_notna[
-                                                          '__perturbed__'] == n, feats])
+                mask = (np.arange(len(regr.estimators_))) % (num + 1)
+                print(test_data_notna['__perturbed__'])
+                maxim = np.max([np.sum(test_data_notna['__perturbed__'] == n) for n in mask])
+                print(maxim)
+                z_pdf = [np.array(tree.predict(test_data_notna.loc[test_data_notna[
+                                                          '__perturbed__'] == n, feats].values), dtype=float)
                      for tree, n in zip(regr.estimators_, mask)]
-                ).T)
+                print(z_pdf[0], type(z_pdf[0]), type(z_pdf[0][0]))
+                for i, n, j in zip(z_pdf, mask, np.arange(len(mask))):
+                    print(i.shape, n)
+                    if i.shape[0] < maxim:
+                        z_pdf[j] = np.array(list(i) + [0.0]*(maxim - i.shape[0]))
+                        print(z_pdf[j], z_pdf[j].shape)
+                print('!!!!!!!!!!!!!!!!!', np.array(z_pdf, dtype=float))#.shape, z_pdf.T.shape)
+                z_pdf = list(np.array(z_pdf).T)
 
                 preds = pd.DataFrame()
                 preds[f'zoo_{mid}_z_pdf'] = z_pdf
+                print(test_data_notna.head(), test_data_notna.shape)
+                print(test_data_notna['__tempid__'])
                 tempids = test_data_notna.loc[
                     test_data_notna['__perturbed__'] == 0, '__tempid__']
+                print('lenn = ', len(z_pdf[0]))
+                print(preds, preds.shape)
+                print(tempids, tempids.shape)
                 preds.index = tempids
 
                 if not keep_in_memory:
@@ -2105,7 +2600,7 @@ def predict(datasets_files, models_path, models: dict, config,
             # preds[[pdf_col]].to_pickle(dst_file, compression='gzip', protocol=4)
             # preds = preds.drop(columns=pdf_col)
             # dst_file = f'{fname}-preds.{mid}{ext}'
-            # preds.to_pickle(dst_file, compression='gzip', protocol=4)
+            # preds.to_pickle(dst_file, compression='gzip')
 
 
 def read_predictions_apart(path: str):
@@ -2178,11 +2673,12 @@ def split_data(xray=None, xray_hp_id_col=None, sdss=None, ps=None, ls=None,
             yield result
 
 
-def assemble_and_analyze_results(buf_path: str, dst_path: str, models_series):
+def assemble_and_analyze_results(buf_path: str, dst_path: str, models_series, file_name=None):
     start_nrow = 1
     models_goodness = [f'{models_series}{mid}' for mid in
                        [22, 19, 18, 15, 21, 20, 34, 35]]
-    for file in glob.glob(os.path.join(buf_path, '*.features.gz_pkl')):
+    assert isinstance(file_name, str) or file_name is None
+    for file in glob.glob(os.path.join(buf_path, '*.features.gz_pkl')) if file_name is None else [os.path.join(buf_path, file_name+'.features.gz_pkl')]:
         data = pd.read_pickle(file, compression='gzip')
         data['__nrow__'] = np.arange(start_nrow, start_nrow + len(data))
         # data.to_pickle(os.path.join(dst_path, os.path.basename(file)),
@@ -2298,111 +2794,113 @@ def main():
     #     print(format_message(
     #         f'Not found PZPH1_MODELS_PATH env variable. Using default path: {models_path}'))
 
-    try:
-        data_path = os.environ['PZPH1_DATA_PATH']
-        print(format_message(f'Found PZPH1_DATA_PATH env variable: {data_path}'))
+#     print('Я родился!')
+## Перенесла в prediction:
+#     try:
+#         data_path = os.environ['PZPH1_DATA_PATH']
+#         print(format_message(f'Found PZPH1_DATA_PATH env variable: {data_path}'))
 
-    except KeyError:
-        data_path = '/data/SRGz/pzph1/'
-        print(format_message(
-            f'Not found PZPH1_DATA_PATH env variable. Using default path: {data_path}'))
+#     except KeyError:
+#         data_path = '/data/SRGz/pzph1/'
+#         print(format_message(
+#             f'Not found PZPH1_DATA_PATH env variable. Using default path: {data_path}'))
 
-    models_path = os.path.join(data_path, 'models')
+#     models_path = os.path.join(data_path, 'models')
 
-    models_series = {
-        'x0': {
-            'path': os.path.join(models_path, 'x0'),
-            'models': {
-                # 15: 'sdssdr16_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',  # there is not sdss wise in getaroundr
-                19: 'psdr2+wise_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-                21: 'psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-                22: 'deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-                35: 'sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-            },
-            'config': {
-                'perturb': 0,
-                'ebv_accounting': False,
-            },
-        },
-        'x0pswf': {
-            'path': os.path.join(models_path, 'x0'),
-            'models': {
-                19: 'psdr2+wise_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-                21: 'psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-                22: 'deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-                35: 'sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-            },
-            'config': {
-                'perturb': 0,
-                'ebv_accounting': False,
-                'use_wise_forced': True,
-            },
-        },
-        "x1": {
-            "path": os.path.join(models_path, 'x1'),
-            "models": {
-                "18": "sdssdr16+wise_deacls8tr_QSO+GALAXY_20201212141009",
-                "19": "psdr2+wise_deacls8tr_QSO+GALAXY_20201212135046",
-                "20": "sdssdr16+all_deacls8tr_QSO+GALAXY_20201212143658",
-                "21": "psdr2+all_deacls8tr_QSO+GALAXY_20201212142333",
-                "22": "deacls8tr_QSO+GALAXY_20201212135641",
-                "34": "sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201212131454",
-                "35": "sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY_20201212133711"
-            },
-            "config": {
-                "perturb": 8,
-                "ebv_accounting": True
-            }
-        },
-        "x1a": {
-            "path": os.path.join(models_path, 'x1'),
-            "models": {
-                "18": "sdssdr16+wise_deacls8tr_QSO+GALAXY_20201212141009",
-                "19": "psdr2+wise_deacls8tr_QSO+GALAXY_20201212135046",
-                "20": "sdssdr16+all_deacls8tr_QSO+GALAXY_20201212143658",
-                "21": "psdr2+all_deacls8tr_QSO+GALAXY_20201212142333",
-                "22": "deacls8tr_QSO+GALAXY_20201212135641",
-                "34": "sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201212131454",
-                "35": "sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY_20201212133711"
-            },
-            "config": {
-                "perturb": 0,
-                "ebv_accounting": True
-            }
-        },
-        'gal0': {
-            'path': os.path.join(models_path, 'gal0'),
-            'models': {
-                # 15: 'sdssdr16_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-                19: 'psdr2+wise_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-                21: 'psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-                22: 'deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-                # 34: 'sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201004092833',
-                35: 'sdssdr16+psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-            },
-            'config': {
-                'perturb': 7,
-                'ebv_accounting': False,
-            }
-        },
-        'gal0pswf': {
-            'path': os.path.join(models_path, 'gal0'),
-            'models': {
-                # 15: 'sdssdr16_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-                19: 'psdr2+wise_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-                21: 'psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-                22: 'deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-                # 34: 'sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201004092833',
-                35: 'sdssdr16+psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-            },
-            'config': {
-                'perturb': 7,
-                'ebv_accounting': False,
-                'use_wise_forced': True,
-            }
-        }
-    }
-
+#     models_series = {
+#         'x0': {
+#             'path': os.path.join(models_path, 'x0'),
+#             'models': {
+#                 # 15: 'sdssdr16_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',  # there is not sdss wise in getaroundr
+#                 19: 'psdr2+wise_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+#                 21: 'psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+#                 22: 'deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+#                 35: 'sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+#             },
+#             'config': {
+#                 'perturb': 0,
+#                 'ebv_accounting': False,
+#             },
+#         },
+#         'x0pswf': {
+#             'path': os.path.join(models_path, 'x0'),
+#             'models': {
+#                 19: 'psdr2+wise_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+#                 21: 'psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+#                 22: 'deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+#                 35: 'sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
+#             },
+#             'config': {
+#                 'perturb': 0,
+#                 'ebv_accounting': False,
+#                 'use_wise_forced': True,
+#             },
+#         },
+#         "x1": {
+#             "path": os.path.join(models_path, 'x1'),
+#             "models": {
+#                 "18": "sdssdr16+wise_deacls8tr_QSO+GALAXY_20201212141009",
+#                 "19": "psdr2+wise_deacls8tr_QSO+GALAXY_20201212135046",
+#                 "20": "sdssdr16+all_deacls8tr_QSO+GALAXY_20201212143658",
+#                 "21": "psdr2+all_deacls8tr_QSO+GALAXY_20201212142333",
+#                 "22": "deacls8tr_QSO+GALAXY_20201212135641",
+#                 "34": "sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201212131454",
+#                 "35": "sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY_20201212133711"
+#             },
+#             "config": {
+#                 "perturb": 8,
+#                 "ebv_accounting": True
+#             }
+#         },
+#         "x1a": {
+#             "path": os.path.join(models_path, 'x1'),
+#             "models": {
+#                 "18": "sdssdr16+wise_deacls8tr_QSO+GALAXY_20201212141009",
+#                 "19": "psdr2+wise_deacls8tr_QSO+GALAXY_20201212135046",
+#                 "20": "sdssdr16+all_deacls8tr_QSO+GALAXY_20201212143658",
+#                 "21": "psdr2+all_deacls8tr_QSO+GALAXY_20201212142333",
+#                 "22": "deacls8tr_QSO+GALAXY_20201212135641",
+#                 "34": "sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201212131454",
+#                 "35": "sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY_20201212133711"
+#             },
+#             "config": {
+#                 "perturb": 0,
+#                 "ebv_accounting": True
+#             }
+#         },
+#         'gal0': {
+#             'path': os.path.join(models_path, 'gal0'),
+#             'models': {
+#                 # 15: 'sdssdr16_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#                 19: 'psdr2+wise_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#                 21: 'psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#                 22: 'deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#                 # 34: 'sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201004092833',
+#                 35: 'sdssdr16+psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#             },
+#             'config': {
+#                 'perturb': 7,
+#                 'ebv_accounting': False,
+#             }
+#         },
+#         'gal0pswf': {
+#             'path': os.path.join(models_path, 'gal0'),
+#             'models': {
+#                 # 15: 'sdssdr16_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#                 19: 'psdr2+wise_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#                 21: 'psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#                 22: 'deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#                 # 34: 'sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201004092833',
+#                 35: 'sdssdr16+psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
+#             },
+#             'config': {
+#                 'perturb': 7,
+#                 'ebv_accounting': False,
+#                 'use_wise_forced': True,
+#             }
+#         }
+#     }
+##
     args = parse_cli_args()
 
     assert args.baseCatalog in ['ps', 'ls', 'sdss', 'gaiaedr3'], 'Other catalogs not implemented yet'
@@ -2610,32 +3108,8 @@ def main():
         """.format(objids_csv_path))
     else:
         if args.modelsIds is not None:
-            if args.customModels is not None:
-                with open(args.customModels, 'r') as fin:
-                    custom_models_series = json.load(fin)
-
-                models_series = {**models_series, **custom_models_series}
-
-            print(models_series[args.modelsSeries])
-
-            models_path = models_series[args.modelsSeries]['path']
-            models = {f'{args.modelsSeries}{mid}': model for mid, model in
-                      models_series[args.modelsSeries]['models'].items()
-                      if int(mid) in args.modelsIds}
-            config = models_series[args.modelsSeries]['config']
-
             files2predict = sorted(files2predict)
-            print(files2predict, models_path, models)
-
-            try:
-                use_wise_forced = config['use_wise_forced']
-            except KeyError:
-                use_wise_forced = False
-
-            print(format_message("Use WISE forced = "), use_wise_forced, 'or', args.useWiseForced)
-
-            predict(files2predict, models_path, models, config,
-                    wise_forced=use_wise_forced or args.useWiseForced,
+            predict(files2predict, args.modelsIds, args.modelsSeries, args.customModels, args.useWiseForced,
                     njobs=args.njobs, keep_in_memory=args.keepModelsInMemory,
                     user_defined_features_transformation=user_defined_features_transformation)
 
@@ -2643,3 +3117,6 @@ def main():
                                      models_series=args.modelsSeries)
         # if args.cleanupBuffer:
         #     shutil.rmtree(buf_path)
+
+if __name__ == '__main__':
+    main()
