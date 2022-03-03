@@ -944,7 +944,7 @@ class Catalog:
 
         # print(format_message('Done'))
 
-    def prepare_features(self, augmentation=False):
+    def prepare_features(self):
         if self.assembled_dataset is None:
             self.assembled_dataset = pd.read_pickle(
                 self.assembled_dataset_path, compression='gzip')
@@ -956,7 +956,7 @@ class Catalog:
 
         self.assembled_dataset = calculate_features_on_full_catalog(
             self.assembled_dataset, ebv_accounting=False, wise_forced=wise_forced,
-            user_defined_features_transformation=self.user_definded_features_transformation, augmentation=augmentation)
+            user_defined_features_transformation=self.user_definded_features_transformation)
 
         # Raises type error if dataset contains predictions pdfs
         # self.assembled_dataset = self.assembled_dataset.replace(
@@ -983,20 +983,23 @@ class Catalog:
                                                    f'{self.filename}.features.gz_pkl')
         self.assembled_dataset.to_pickle(self.assembled_dataset_path,
                                          compression='gzip', protocol=4)
-        return self.assembled_dataset
 
-    def prepare_data(self):
-        print(f'Use_case = {self.use_case}')
+    def prepare_data(self, augmentation=False, dms=[-1, 1]):
+        print('Use case', self.use_case)
         if self.use_case <= 0 or self.use_case is None:
+            print('Use case 0 or None')
             return None
 
         if self.use_case <= 1:
+            print('Use case prepare_catalog_from_xray')
             self.prepare_catalog_from_xray()
 
         if self.use_case <= 2:
+            print('Use case prepare_catalog_from_base_data')
             self.prepare_catalog_from_base_data()
 
         if self.ps_fluxes_manually and self.ps_fluxes is None:
+            print('Use case self.ps_fluxes_manually and self.ps_fluxes is None')
             if self.ps_objids is None:
                 self.ps_objids = \
                 astropy.table.Table.read(self.photo_data_paths['ps'])[
@@ -1008,9 +1011,21 @@ class Catalog:
             return "ps_manual"
 
         if self.use_case <= 3:
+            print('Use case prepare_catalog_from_correlated_data')
             self.prepare_catalog_from_correlated_data()
 
         if self.use_case <= 4:
+            if augmentation!=False:
+                print('Use case augmentation')
+                out_paths = data_augmentation(self.assembled_dataset_path)
+                print('Use case prepare_features')
+                for out_path in out_paths:
+                    self.assembled_dataset = None
+                    self.assembled_dataset_path = out_path
+                    self.prepare_features()
+                return "Done"
+            
+            print('Use case prepare_features')
             self.prepare_features()
 
         return "Done"
@@ -1396,17 +1411,17 @@ def plotik(x, y, name=''):
     ax.set_ylim([-10, 400])
     ax.scatter(x, y, c='r')
     f.savefig('plt/'+name+'.png')
-
-
-def asinhmag_dm(flux, flux_err=None, flux_ivar=None, dm=0, path_to_model=None):
+    
+def aug_dm(flux, flux_err=None, flux_ivar=None, dm=0, path_to_model=None):
     """
-    Calculate asinh mognitude with dm shift.
+   Augmentation with dm shift.
     ::flux      - flux in [nanomaggies]
     ::flux_ivar - inverse variance of flux in [1/nanomaggies**2]
     ::flux_err  - flux error in [nanomaggies]
     ::dm        - magnitude shift
+    ::path_to_model - path to model for augmentation
     """
-    print('asinhmag_dm')
+    print('aug_dm')
     
     def gauss_flux(inputs):
         mu, err = inputs
@@ -1415,11 +1430,11 @@ def asinhmag_dm(flux, flux_err=None, flux_ivar=None, dm=0, path_to_model=None):
     
     def read_model(path_to_model):
         model = KNN_Augmentation(model_path=path_to_model, type_model=AugmType.KNN)
-        print('read model knn')
         return model
       
     assert (flux_err is not None) ^ (
                 flux_ivar is not None), 'specify only flux_err or flux_ivar'
+    
     f = flux * np.power(10, 0.4 * dm)
     
     if flux_ivar is not None:
@@ -1431,31 +1446,155 @@ def asinhmag_dm(flux, flux_err=None, flux_ivar=None, dm=0, path_to_model=None):
         plotik(f / np.power(10, 0.4 * dm), b, flux.name + 'before')
         model = read_model(path_to_model)
         print(model.type_model)
-        b = model.neighbors(f.values, sigma=b)
+        b[dm!=0] = model.neighbors(f[dm!=0].values, sigma=b[dm!=0])
         plotik(f, b, flux.name + 'after_tmp')
         #Разыгрываем поток
-        f = np.array(list(map(gauss_flux, zip(f, b))))
+        f[dm!=0] = np.array(list(map(gauss_flux, zip(f[dm!=0], b[dm!=0]))))
         plotik(f, b, flux.name + 'after')
         
-    f, b = f.astype(np.float64) / 1e9 , b.astype(np.float64) / 1e9  # otherwise type error like
+    f, b = f.astype(np.float64) , b.astype(np.float64)
+
+    return f, np.power(b, -2) if flux_ivar is not None else b
+
+
+def fluxaug(flux, err, dms=None):
+    """
+    ::flux - pandas.DataFrame with fluxes
+    ::err - pandas.DataFrame with corresponding errors. Columns must be in the same order
+        (e.g. flux_r, flux_u, flux_w2 => err_r, err_u, ivar_w2)
+        if "ivar" or "Ivar" is substring of error column name, then numbers in this columns are interperted
+        as inverse variance of flux in [1/nanomaggies**2], else as flux error in [nanomaggies]
+    ::columns - dict where keys are columns names from flux param and values are result columns names
+        (e.g. {"flux_z":"mag_z"})
+    """
+    if dms is None:
+        dms = np.zeros(len(flux))
+
+    for f, i in zip(flux.columns, err.columns):
+            
+        path_to_model = f"/home/nmalysheva/task/S-G-Q_DESI+PanSTARRS+SDSS+WISE+J_UHS/pzph/aug_models/{f}"
+
+        if 'ivar' in i or 'Ivar' in i:
+            print(i, 'ivar')
+            flux[f], err[i] = aug_dm(flux[f], flux_ivar=err[i], dm=dms, path_to_model=path_to_model)
+        elif re.findall('^ps_dw\dflux_ab$', i):
+            print(i, 'err')
+            flux[f], err[i] = aug_dm(
+                flux[f].replace(-999, np.NaN),
+                flux_err=err[i].replace(-999, np.NaN),
+                dm=dms, path_to_model=path_to_model
+            )
+        else:
+            print(i, 'err')
+            flux[f], err[i] = aug_dm(
+                flux[f].replace(-999, np.NaN) / 3621e-9,
+                flux_err=err[i].replace(-999, np.NaN) / 3621e-9,
+                dm=dms,
+                path_to_model=path_to_model
+            )
+
+    return flux, err
+
+
+def calculate_aug(catalog: pd.DataFrame, dms_column='dm'):
+    sdss_flux_columns = [
+        'psfFlux_u', 'psfFluxIvar_u', 'psfFlux_g',
+        'psfFluxIvar_g', 'psfFlux_r', 'psfFluxIvar_r', 'psfFlux_i',
+        'psfFluxIvar_i', 'psfFlux_z', 'psfFluxIvar_z', 'cModelFlux_u',
+        'cModelFluxIvar_u', 'cModelFlux_g', 'cModelFluxIvar_g', 'cModelFlux_r',
+        'cModelFluxIvar_r', 'cModelFlux_i', 'cModelFluxIvar_i', 'cModelFlux_z',
+        'cModelFluxIvar_z'
+    ]
+    sdss_flux_columns = ['sdss_' + col for col in sdss_flux_columns]
+    sdss_flux_columns, sdss_error_columns = sdss_flux_columns[
+                                            ::2], sdss_flux_columns[1::2]
+    sdss_mag_columns = {
+        **{f'sdss_psfFlux_{pb}': f'sdssdr16_{pb}_psf' for pb in 'ugriz'},
+        **{f'sdss_cModelFlux_{pb}': f'sdssdr16_{pb}_cmodel' for pb in 'ugriz'},
+    }
+    
+    psdr2_flux_columns = [
+        'gKronFluxErr',
+        'gKronFlux', 'rKronFluxErr', 'rKronFlux',
+        'iKronFluxErr', 'iKronFlux',
+        'zKronFluxErr', 'zKronFlux',
+        'yKronFluxErr', 'yKronFlux',
+        'gPSFFluxErr', 'gPSFFlux', 'rPSFFluxErr',
+        'rPSFFlux', 'iPSFFluxErr', 'iPSFFlux',
+        'zPSFFluxErr', 'zPSFFlux', 'yPSFFluxErr',
+        'yPSFFlux'
+    ]
+    psdr2_flux_columns = ['ps_' + col for col in psdr2_flux_columns]
+    psdr2_flux_columns, psdr2_error_columns = psdr2_flux_columns[
+                                              1::2], psdr2_flux_columns[::2]
+    
+    flux_cols = [
+        'flux_g_ebv', 'flux_r_ebv', 'flux_z_ebv',
+        'flux_w1_ebv', 'flux_w2_ebv', 'flux_w3_ebv', 'flux_w4_ebv'
+    ]
+    flux_cols = ['ls_' + col for col in flux_cols]
+    ivar_cols = [
+        'flux_ivar_g', 'flux_ivar_r', 'flux_ivar_z',
+        'flux_ivar_w1', 'flux_ivar_w2', 'flux_ivar_w3', 'flux_ivar_w4'
+    ]
+    ivar_cols = ['ls_' + col for col in ivar_cols]
+    
+    fluxes = catalog[sdss_flux_columns + psdr2_flux_columns + flux_cols].astype(np.float)
+    errors = catalog[sdss_error_columns + psdr2_error_columns + ivar_cols].astype(np.float)
+    dms    = catalog[dms_column]
+            
+    catalog[fluxes.columns], catalog[errors.columns] = fluxaug(fluxes, errors, dms)
+
+    return catalog
+
+
+def data_augmentation(input_data: str, output_path: str =None, dms=[1, -1, -2]):
+    """
+    Full application of data augmentation
+    ::input_path  - path to input data
+    ::output_path - path to output
+    """
+    df = Catalog.read_table(input_data)
+    df['dm'] = 0
+    if output_path is None:
+        output_path = os.path.dirname(input_data)
+    df.to_pickle(os.path.join(output_path, 'tmp.dm0.augmentation.gz_pkl'), compression='gzip')
+    out_paths = [os.path.join(output_path, 'tmp.dm0.augmentation.gz_pkl')]
+    for i in dms:
+        df['dm'] = i
+        out_paths.append(os.path.join(output_path, f'tmp.dm{i}.augmentation.gz_pkl'))
+        calculate_aug(df).to_pickle(os.path.join(output_path, f'tmp.dm{i}.augmentation.gz_pkl'), compression='gzip')
+
+    print(out_paths)
+    return out_paths
+    
+##############################################################################################
+
+
+def asinhmag_dm(flux, flux_err=None, flux_ivar=None, dm=0):
+    """
+    Calculate asinh mognitude with dm shift.
+    ::flux      - flux in [nanomaggies]
+    ::flux_ivar - inverse variance of flux in [1/nanomaggies**2]
+    ::flux_err  - flux error in [nanomaggies]
+    ::dm        - magnitude shift
+    """
+    assert (flux_err is not None) ^ (
+                flux_ivar is not None), 'specify only flux_err or flux_ivar'
+    f = flux / 1e9 * np.power(10, 0.4 * dm)
+    if flux_ivar is not None:
+        b = np.power(flux_ivar, -0.5) / 1e9 * np.power(10, 0.4 * dm)
+    else:
+        b = flux_err / 1e9 * np.power(10, 0.4 * dm)
+
+    f, b = f.astype(np.float64), b.astype(
+        np.float64)  # otherwise type error like
+    # TypeError: loop of ufunc does not support argument 0 of type numpy.float64 which has no callable arcsinh method
 
     return (np.arcsinh(f / (2 * b)) + np.log(b)) * (-2.5 / np.log(10))
-#     assert (flux_err is not None) ^ (
-#                 flux_ivar is not None), 'specify only flux_err or flux_ivar'
-#     f = flux / 1e9 * np.power(10, 0.4 * dm)
-#     if flux_ivar is not None:
-#         b = np.power(flux_ivar, -0.5) / 1e9 * np.power(10, 0.4 * dm)
-#     else:
-#         b = flux_err / 1e9 * np.power(10, 0.4 * dm)
-
-#     f, b = f.astype(np.float64), b.astype(
-#         np.float64)  # otherwise type error like
-#     # TypeError: loop of ufunc does not support argument 0 of type numpy.float64 which has no callable arcsinh method
-
-#     return (np.arcsinh(f / (2 * b)) + np.log(b)) * (-2.5 / np.log(10))
 
 
-def flux2mag(flux, err, columns, dms=None, augmentation=False):
+def flux2mag(flux, err, columns, dms=None):
     """
     ::flux - pandas.DataFrame with fluxes
     ::err - pandas.DataFrame with corresponding errors. Columns must be in the same order
@@ -1472,31 +1611,23 @@ def flux2mag(flux, err, columns, dms=None, augmentation=False):
     for f, i, dm in zip(flux.columns, err.columns, dms):
         if dm is None:
             dm = 0
-            
-        print('DM for', f, '=', dm)
-            
-        if not augmentation:
-            path_to_model = None
-        else:
-            path_to_model = f"/home/nmalysheva/task/S-G-Q_DESI+PanSTARRS+SDSS+WISE+J_UHS/pzph/aug_models/{f}"
 
         if 'ivar' in i or 'Ivar' in i:
             print(i, 'ivar')
-            result[columns[f]] = asinhmag_dm(flux[f], flux_ivar=err[i], dm=dm, path_to_model=path_to_model)
+            result[columns[f]] = asinhmag_dm(flux[f], flux_ivar=err[i], dm=dm)
         elif re.findall('^ps_dw\dflux_ab$', i):
             print(i, 'err')
             result[columns[f]] = asinhmag_dm(
                 flux[f].replace(-999, np.NaN),
                 flux_err=err[i].replace(-999, np.NaN),
-                dm=dm, path_to_model=path_to_model
+                dm=dm
             )
         else:
             print(i, 'err')
             result[columns[f]] = asinhmag_dm(
                 flux[f].replace(-999, np.NaN) / 3621e-9,
                 flux_err=err[i].replace(-999, np.NaN) / 3621e-9,
-                dm=dm,
-                path_to_model=path_to_model
+                dm=dm
             )
 
     result.index = flux.index
@@ -1568,7 +1699,7 @@ def calculate_decals8tr_features(df):
 
 
 def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
-                                               wise_forced=False, augmentation=False):
+                                               wise_forced=False):
     sdss_flux_columns = [
         'psfFlux_u', 'psfFluxIvar_u', 'psfFlux_g',
         'psfFluxIvar_g', 'psfFlux_r', 'psfFluxIvar_r', 'psfFlux_i',
@@ -1587,7 +1718,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
 
     fluxes, errors = catalog[sdss_flux_columns], catalog[sdss_error_columns]
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, sdss_mag_columns, augmentation=augmentation)
+    mags = flux2mag(fluxes, errors, sdss_mag_columns)
     catalog[mags.columns] = mags
 
     psdr2_flux_columns = [
@@ -1611,7 +1742,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
 
     fluxes, errors = catalog[psdr2_flux_columns], catalog[psdr2_error_columns]
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, psdr2_mag_columns, augmentation=augmentation)
+    mags = flux2mag(fluxes, errors, psdr2_mag_columns)
     mags = missing_kron_to_psf(mags)
     catalog[mags.columns] = mags
 
@@ -1639,7 +1770,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
     fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
         ivar_cols].astype(np.float)
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, mag_columns, augmentation=augmentation)
+    mags = flux2mag(fluxes, errors, mag_columns)
     catalog[mags.columns] = mags
 
     if wise_forced:
@@ -1671,7 +1802,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
             err_cols].astype(np.float)
 
         errors[errors <= 0] = np.nan
-        mags = flux2mag(fluxes, errors, mag_columns, augmentation=augmentation)
+        mags = flux2mag(fluxes, errors, mag_columns)
         catalog[mags.columns] = mags
 
     catalog = calculate_standard_features(  # SDSS features
@@ -1693,7 +1824,7 @@ def _calculate_features_on_full_catalog_helper(catalog: pd.DataFrame,
 
 
 def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
-                                                   wise_forced=False, augmentation=False):
+                                                   wise_forced=False):
     sdss_flux_columns = [
         'psfFlux_u', 'psfFluxIvar_u', 'psfFlux_g',
         'psfFluxIvar_g', 'psfFlux_r', 'psfFluxIvar_r', 'psfFlux_i',
@@ -1725,7 +1856,7 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
     ]
     fluxes, errors = catalog[sdss_flux_columns], catalog[sdss_error_columns]
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, sdss_mag_columns, dms, augmentation=augmentation)
+    mags = flux2mag(fluxes, errors, sdss_mag_columns, dms)
     catalog[mags.columns] = mags
 
     psdr2_flux_columns = [
@@ -1761,7 +1892,7 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
     ]
     fluxes, errors = catalog[psdr2_flux_columns], catalog[psdr2_error_columns]
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, psdr2_mag_columns, dms, augmentation=augmentation)
+    mags = flux2mag(fluxes, errors, psdr2_mag_columns, dms)
     mags = missing_kron_to_psf(mags)
     catalog[mags.columns] = mags
 
@@ -1789,7 +1920,7 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
     fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
         ivar_cols].astype(np.float)
     errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, mag_columns, augmentation=augmentation)
+    mags = flux2mag(fluxes, errors, mag_columns)
     catalog[mags.columns] = mags
     print(catalog['decals8tr_Lw1'])
 
@@ -1826,166 +1957,7 @@ def _calculate_features_on_full_catalog_ebv_helper(catalog: pd.DataFrame,
         # fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
         #     err_cols].astype(np.float)
         errors[errors <= 0] = np.nan
-        mags = flux2mag(fluxes, errors, mag_columns, dms, augmentation=augmentation)
-        print(mags['decals8tr_Lw1'])
-        catalog[mags.columns] = mags
-
-    print(catalog['decals8tr_Lw1'])
-
-    # print(mags['decals8tr_Lw1'])
-
-    catalog = calculate_standard_features(  # SDSS features
-        catalog,
-        passbands='ugriz',
-        mag_types=['psf', 'cmodel'],
-        mags_fmt='sdssdr16_{pb}_{typ}',
-        prefix='sdssdr16_'
-    )
-    catalog = calculate_standard_features(  # PSDR2 features
-        catalog,
-        passbands='grizy',
-        mag_types=['psf', 'kron'],
-        mags_fmt='psdr2_{pb}_{typ}',
-        prefix='psdr2_'
-    )
-    catalog = calculate_decals8tr_features(catalog)
-    return catalog
-
-
-def _calculate_features_on_full_catalog_castom_dms(catalog: pd.DataFrame,
-                                                   wise_forced=False,
-                                                   DMs=None,
-                                                   augmentation=False):
-    sdss_flux_columns = [
-        'psfFlux_u', 'psfFluxIvar_u', 'psfFlux_g',
-        'psfFluxIvar_g', 'psfFlux_r', 'psfFluxIvar_r', 'psfFlux_i',
-        'psfFluxIvar_i', 'psfFlux_z', 'psfFluxIvar_z', 'cModelFlux_u',
-        'cModelFluxIvar_u', 'cModelFlux_g', 'cModelFluxIvar_g', 'cModelFlux_r',
-        'cModelFluxIvar_r', 'cModelFlux_i', 'cModelFluxIvar_i', 'cModelFlux_z',
-        'cModelFluxIvar_z'
-    ]
-    sdss_flux_columns = ['sdss_' + col for col in sdss_flux_columns]
-    sdss_flux_columns, sdss_error_columns = sdss_flux_columns[
-                                            ::2], sdss_flux_columns[1::2]
-    sdss_mag_columns = {
-        **{f'sdss_psfFlux_{pb}': f'sdssdr16_{pb}_psf' for pb in 'ugriz'},
-        **{f'sdss_cModelFlux_{pb}': f'sdssdr16_{pb}_cmodel' for pb in 'ugriz'},
-    }
-    
-    if isinstance(DMs, dict):
-        dms = [DMs[flux_name] for flux_name in sdss_flux_columns]
-    elif isinstance(DMs, float) or isinstance(DMs, int):
-        dms = [DMs]*len(sdss_flux_columns)
-    else:
-        dms = None
-    
-    fluxes, errors = catalog[sdss_flux_columns], catalog[sdss_error_columns]
-    errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, sdss_mag_columns, dms, augmentation=augmentation)
-    catalog[mags.columns] = mags
-
-    psdr2_flux_columns = [
-        'gKronFluxErr',
-        'gKronFlux', 'rKronFluxErr', 'rKronFlux',
-        'iKronFluxErr', 'iKronFlux',
-        'zKronFluxErr', 'zKronFlux',
-        'yKronFluxErr', 'yKronFlux',
-        'gPSFFluxErr', 'gPSFFlux', 'rPSFFluxErr',
-        'rPSFFlux', 'iPSFFluxErr', 'iPSFFlux',
-        'zPSFFluxErr', 'zPSFFlux', 'yPSFFluxErr',
-        'yPSFFlux'
-    ]
-    psdr2_flux_columns = ['ps_' + col for col in psdr2_flux_columns]
-    psdr2_flux_columns, psdr2_error_columns = psdr2_flux_columns[
-                                              1::2], psdr2_flux_columns[::2]
-    psdr2_mag_columns = {
-        **{f'ps_{pb}PSFFlux': f'psdr2_{pb}_psf' for pb in 'grizy'},
-        **{f'ps_{pb}KronFlux': f'psdr2_{pb}_kron' for pb in 'grizy'},
-    }
-    
-    if isinstance(DMs, dict):
-        dms = [DMs[flux_name] for flux_name in psdr2_flux_columns]
-    elif isinstance(DMs, float) or isinstance(DMs, int):
-        dms = [DMs]*len(psdr2_flux_columns)
-    else:
-        dms = None
-        
-    fluxes, errors = catalog[psdr2_flux_columns], catalog[psdr2_error_columns]
-    errors[errors <= 0] = np.nan
-    mags = flux2mag(fluxes, errors, psdr2_mag_columns, dms, augmentation=augmentation)
-    mags = missing_kron_to_psf(mags)
-    catalog[mags.columns] = mags
-
-    flux_cols = [
-        'flux_g_ebv', 'flux_r_ebv', 'flux_z_ebv',
-        'flux_w1_ebv', 'flux_w2_ebv', 'flux_w3_ebv', 'flux_w4_ebv'
-    ]
-    flux_cols = ['ls_' + col for col in flux_cols]
-    ivar_cols = [
-        'flux_ivar_g', 'flux_ivar_r', 'flux_ivar_z',
-        'flux_ivar_w1', 'flux_ivar_w2', 'flux_ivar_w3', 'flux_ivar_w4'
-    ]
-    ivar_cols = ['ls_' + col for col in ivar_cols]
-    mag_columns = {
-        **{f'ls_flux_{pb}_ebv': f'decals8tr_{pb}' for pb in 'grz'},
-        **{f'ls_flux_w{pb}_ebv': f'decals8tr_Lw{pb}' for pb in '1234'},
-    }
-
-    for pb in ['g', 'r', 'z', 'w1', 'w2', 'w3', 'w4']:
-        fcol = f'ls_flux_{pb}'
-        fcol_new = f'ls_flux_{pb}_ebv'
-        mwcol = f'ls_mw_transmission_{pb}'
-        catalog[fcol_new] = catalog[fcol] / catalog[mwcol]
-
-    fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
-        ivar_cols].astype(np.float)
-    errors[errors <= 0] = np.nan
-    
-    if isinstance(DMs, dict):
-        dms = [DMs[flux_name] for flux_name in flux_cols]
-    elif isinstance(DMs, float) or isinstance(DMs, int):
-        dms = [DMs]*len(flux_cols)
-    else:
-        dms = None
-    mags = flux2mag(fluxes, errors, mag_columns, dms, augmentation=augmentation)
-    catalog[mags.columns] = mags
-
-    if wise_forced:
-        print("CALCULATING WISE FORCED")
-        # catalog[['ps_w1flux', 'ps_dw1flux']] *= 10 ** (-2.699 / 2.5)
-        # catalog[['ps_w2flux', 'ps_dw2flux']] *= 10 ** (-3.339 / 2.5)
-        #
-        # flux_cols = ['ps_w1flux', 'ps_w2flux']
-        # err_cols = ['ps_dw1flux', 'ps_dw2flux']
-        # mag_columns = {'ps_w1flux': 'decals8tr_Lw1',
-        #                'ps_w2flux': 'decals8tr_Lw2'}
-
-        catalog[['ps_w1flux_ab', 'ps_dw1flux_ab']] = catalog[['ps_w1flux',
-                                                              'ps_dw1flux']] * 10 ** (
-                                                                 -2.699 / 2.5)
-        catalog[['ps_w2flux_ab', 'ps_dw2flux_ab']] = catalog[['ps_w2flux',
-                                                              'ps_dw2flux']] * 10 ** (
-                                                                 -3.339 / 2.5)
-
-        flux_cols = ['ps_w1flux_ab', 'ps_w2flux_ab']
-        err_cols = ['ps_dw1flux_ab', 'ps_dw2flux_ab']
-        mag_columns = {'ps_w1flux_ab': 'decals8tr_Lw1',
-                       'ps_w2flux_ab': 'decals8tr_Lw2'}
-
-        fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
-            err_cols].astype(np.float)
-
-        if isinstance(DMs, dict):
-            dms = [DMs[flux_name] for flux_name in flux_cols]
-        elif isinstance(DMs, float) or isinstance(DMs, int):
-            dms = [DMs]*len(flux_cols)
-        else:
-            dms = None
-        # print(dms)
-        # fluxes, errors = catalog[flux_cols].astype(np.float), catalog[
-        #     err_cols].astype(np.float)
-        errors[errors <= 0] = np.nan
-        mags = flux2mag(fluxes, errors, mag_columns, dms, augmentation=augmentation)
+        mags = flux2mag(fluxes, errors, mag_columns, dms)
         print(mags['decals8tr_Lw1'])
         catalog[mags.columns] = mags
 
@@ -2013,21 +1985,17 @@ def _calculate_features_on_full_catalog_castom_dms(catalog: pd.DataFrame,
 
 def calculate_features_on_full_catalog(data: pd.DataFrame, ebv_accounting=True,
                                        wise_forced=False,
-                                       user_defined_features_transformation=lambda x: x,
-                                       augmentation=False, dms=None):
+                                       user_defined_features_transformation=lambda x: x):
 
     data = user_defined_features_transformation(data)
 
     print(format_message(ebv_accounting))
-    if not(dms is None):
-        dst =  _calculate_features_on_full_catalog_castom_dms(data,
-                                                        wise_forced=wise_forced, augmentation=augmentation, DMs=dms)
-    elif ebv_accounting:
+    if ebv_accounting:
         dst = _calculate_features_on_full_catalog_ebv_helper(data,
-                                                            wise_forced=wise_forced, augmentation=augmentation)
+                                                            wise_forced=wise_forced)
     else:
         dst = _calculate_features_on_full_catalog_helper(data,
-                                                        wise_forced=wise_forced, augmentation=augmentation)
+                                                        wise_forced=wise_forced)
 
     return dst
 
@@ -2785,122 +2753,7 @@ def copyfile_link(src, dst, symlink=True):
 
 
 def main():
-    # try:
-    #     models_path = os.environ['PZPH1_MODELS_PATH']
-    #     print(format_message(f'Found PZPH1_MODELS_PATH env variable: {models_path}'))
-    #
-    # except KeyError:
-    #     models_path = '/data/SRGz/pzph1/models'
-    #     print(format_message(
-    #         f'Not found PZPH1_MODELS_PATH env variable. Using default path: {models_path}'))
 
-#     print('Я родился!')
-## Перенесла в prediction:
-#     try:
-#         data_path = os.environ['PZPH1_DATA_PATH']
-#         print(format_message(f'Found PZPH1_DATA_PATH env variable: {data_path}'))
-
-#     except KeyError:
-#         data_path = '/data/SRGz/pzph1/'
-#         print(format_message(
-#             f'Not found PZPH1_DATA_PATH env variable. Using default path: {data_path}'))
-
-#     models_path = os.path.join(data_path, 'models')
-
-#     models_series = {
-#         'x0': {
-#             'path': os.path.join(models_path, 'x0'),
-#             'models': {
-#                 # 15: 'sdssdr16_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',  # there is not sdss wise in getaroundr
-#                 19: 'psdr2+wise_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-#                 21: 'psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-#                 22: 'deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-#                 35: 'sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-#             },
-#             'config': {
-#                 'perturb': 0,
-#                 'ebv_accounting': False,
-#             },
-#         },
-#         'x0pswf': {
-#             'path': os.path.join(models_path, 'x0'),
-#             'models': {
-#                 19: 'psdr2+wise_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-#                 21: 'psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-#                 22: 'deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-#                 35: 'sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY-train_QSO_XbalancedGALAXY-sdss_unwise-wo_3XMM_XXLN_S82X_LH-w_VHzQs-v2-asinhmag_features',
-#             },
-#             'config': {
-#                 'perturb': 0,
-#                 'ebv_accounting': False,
-#                 'use_wise_forced': True,
-#             },
-#         },
-#         "x1": {
-#             "path": os.path.join(models_path, 'x1'),
-#             "models": {
-#                 "18": "sdssdr16+wise_deacls8tr_QSO+GALAXY_20201212141009",
-#                 "19": "psdr2+wise_deacls8tr_QSO+GALAXY_20201212135046",
-#                 "20": "sdssdr16+all_deacls8tr_QSO+GALAXY_20201212143658",
-#                 "21": "psdr2+all_deacls8tr_QSO+GALAXY_20201212142333",
-#                 "22": "deacls8tr_QSO+GALAXY_20201212135641",
-#                 "34": "sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201212131454",
-#                 "35": "sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY_20201212133711"
-#             },
-#             "config": {
-#                 "perturb": 8,
-#                 "ebv_accounting": True
-#             }
-#         },
-#         "x1a": {
-#             "path": os.path.join(models_path, 'x1'),
-#             "models": {
-#                 "18": "sdssdr16+wise_deacls8tr_QSO+GALAXY_20201212141009",
-#                 "19": "psdr2+wise_deacls8tr_QSO+GALAXY_20201212135046",
-#                 "20": "sdssdr16+all_deacls8tr_QSO+GALAXY_20201212143658",
-#                 "21": "psdr2+all_deacls8tr_QSO+GALAXY_20201212142333",
-#                 "22": "deacls8tr_QSO+GALAXY_20201212135641",
-#                 "34": "sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201212131454",
-#                 "35": "sdssdr16+psdr2+all_deacls8tr_QSO+GALAXY_20201212133711"
-#             },
-#             "config": {
-#                 "perturb": 0,
-#                 "ebv_accounting": True
-#             }
-#         },
-#         'gal0': {
-#             'path': os.path.join(models_path, 'gal0'),
-#             'models': {
-#                 # 15: 'sdssdr16_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#                 19: 'psdr2+wise_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#                 21: 'psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#                 22: 'deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#                 # 34: 'sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201004092833',
-#                 35: 'sdssdr16+psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#             },
-#             'config': {
-#                 'perturb': 7,
-#                 'ebv_accounting': False,
-#             }
-#         },
-#         'gal0pswf': {
-#             'path': os.path.join(models_path, 'gal0'),
-#             'models': {
-#                 # 15: 'sdssdr16_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#                 19: 'psdr2+wise_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#                 21: 'psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#                 22: 'deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#                 # 34: 'sdssdr16+psdr2+wise_deacls8tr_QSO+GALAXY_20201004092833',
-#                 35: 'sdssdr16+psdr2+all_deacls8tr_GALAXY-train_GALAXY_million-sdss_unwise-wo_XXLN_S82X_LH-asinhmag_features',
-#             },
-#             'config': {
-#                 'perturb': 7,
-#                 'ebv_accounting': False,
-#                 'use_wise_forced': True,
-#             }
-#         }
-#     }
-##
     args = parse_cli_args()
 
     assert args.baseCatalog in ['ps', 'ls', 'sdss', 'gaiaedr3'], 'Other catalogs not implemented yet'
