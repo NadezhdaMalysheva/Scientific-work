@@ -978,13 +978,16 @@ class Catalog:
                 self.assembled_dataset, ra_col, dec_col).items():
             self.assembled_dataset[flag_name] = flag_values
 
-        os.remove(self.assembled_dataset_path)
+        if not (self.assembled_dataset_path is None):
+            os.remove(self.assembled_dataset_path)
         self.assembled_dataset_path = os.path.join(self.output_dir,
                                                    f'{self.filename}.features.gz_pkl')
         self.assembled_dataset.to_pickle(self.assembled_dataset_path,
                                          compression='gzip', protocol=4)
 
-    def prepare_data(self, augmentation=False, dms=[-1, 1]):
+    def prepare_data(self, augmentation=False,
+                     augmodel_path='/home/nmalysheva/task/S-G-Q_DESI+PanSTARRS+SDSS+WISE+J_UHS/pzph/AugModel',
+                     dms=[-1, 1, 2]):
         print('Use case', self.use_case)
         if self.use_case <= 0 or self.use_case is None:
             print('Use case 0 or None')
@@ -1015,14 +1018,42 @@ class Catalog:
             self.prepare_catalog_from_correlated_data()
 
         if self.use_case <= 4:
-            if augmentation!=False:
-                print('Use case augmentation')
-                out_paths = data_augmentation(self.assembled_dataset_path)
-                print('Use case prepare_features')
-                for out_path in out_paths:
-                    self.assembled_dataset = None
-                    self.assembled_dataset_path = out_path
+            if augmentation:
+                
+                if isinstance(augmentation, str):
+                    if os.path.exists(augmentation):
+                        augmodel_path = augmentation
+                        
+                model = Augmentation.read(augmodel_path)
+                model.debug=False
+                filename = self.filename
+                path = self.assembled_dataset_path
+                
+                # dm == 0
+                import shutil
+                shutil.copyfile(self.assembled_dataset_path,
+                                os.path.join(self.output_dir,
+                                             f'{filename}.augmentation_0.gz_pkl')
+                               )
+                self.filename = filename + '_0'
+                self.prepare_features()
+                
+                # dm != 0
+                for dm in dms:
+                    if dm == 0:
+                        continue
+                    print(f'Use case augmentation dm == {dm}')
+                    self.assembled_dataset = model.predict(os.path.join(self.output_dir, 
+                                                                        f'{filename}.augmentation_0.gz_pkl'),
+                                                           dm) #TODO
+                    self.assembled_dataset.to_pickle(
+                                         os.path.join(self.output_dir,f'{filename}.augmentation_{dm}.gz_pkl'),
+                                         compression='gzip', protocol=4)
+                    print(f'Use case prepare_features dm == {dm}')
+                    self.filename = filename + f'_{dm}'
+                    self.assembled_dataset_path = None
                     self.prepare_features()
+                    
                 return "Done"
             
             print('Use case prepare_features')
@@ -1311,6 +1342,259 @@ class AugmType(Enum):
     KNN = 1
     RNN = 2 # not implemented
     MIX = 3
+    
+    
+## >>>>>>> NEW
+
+class Augmentation:
+    import warnings
+    def __init__(self, type_model=AugmType.KNN, n_neighbors=5, path_to_models=None, debug=False):
+        self.path_to_data = None
+        self.type = type_model
+        self.n_neighbors = n_neighbors
+        self.debug = debug
+        if path_to_models is None:
+            warnings.warn('path_to_models is not define. Will be used ./AugModel')
+            if not os.path.exists('./AugModel'):
+                os.mkdir('./AugModel')
+            self.path_to_model = './AugModel'
+        elif not os.path.exists(file_path):
+            warnings.warn(f'{path_to_models} didn\'t exist! Try to create...')
+            try:
+                os.mkdir(path_to_models)
+            except OSError:
+                print (f"Failed to create directory {path_to_models}! Will be used ./AugModel")
+                if not os.path.exists('./AugModel'):
+                    os.mkdir('./AugModel')
+                self.path_to_model = './AugModel'
+            else:
+                print ("The directory has been successfully created")
+                self.path_to_model = path_to_models
+        else:
+            self.path_to_model = path_to_models
+        
+        
+        self.used_flux = set()
+        self.flux_err = {
+            'sdss_psfFlux_u': 'sdss_psfFluxIvar_u',
+            'sdss_psfFlux_g': 'sdss_psfFluxIvar_g',
+            'sdss_psfFlux_r': 'sdss_psfFluxIvar_r',
+            'sdss_psfFlux_i': 'sdss_psfFluxIvar_i',
+            'sdss_psfFlux_z': 'sdss_psfFluxIvar_z',
+            'sdss_cModelFlux_u': 'sdss_cModelFluxIvar_u',
+            'sdss_cModelFlux_g': 'sdss_cModelFluxIvar_g',
+            'sdss_cModelFlux_r': 'sdss_cModelFluxIvar_r',
+            'sdss_cModelFlux_i': 'sdss_cModelFluxIvar_i',
+            'sdss_cModelFlux_z': 'sdss_cModelFluxIvar_z',
+            'ps_gKronFlux': 'ps_gKronFluxErr',
+            'ps_rKronFlux': 'ps_rKronFluxErr',
+            'ps_iKronFlux': 'ps_iKronFluxErr',
+            'ps_zKronFlux': 'ps_zKronFluxErr',
+            'ps_yKronFlux': 'ps_yKronFluxErr',
+            'ps_gPSFFlux': 'ps_gPSFFluxErr',
+            'ps_rPSFFlux': 'ps_rPSFFluxErr',
+            'ps_iPSFFlux': 'ps_iPSFFluxErr',
+            'ps_zPSFFlux': 'ps_zPSFFluxErr',
+            'ps_yPSFFlux': 'ps_yPSFFluxErr',
+            'ls_flux_g_ebv': 'ls_flux_ivar_g',
+            'ls_flux_r_ebv': 'ls_flux_ivar_r',
+            'ls_flux_z_ebv': 'ls_flux_ivar_z',
+            'ls_flux_w1_ebv': 'ls_flux_ivar_w1',
+            'ls_flux_w2_ebv': 'ls_flux_ivar_w2',
+            'ls_flux_w3_ebv': 'ls_flux_ivar_w3',
+            'ls_flux_w4_ebv': 'ls_flux_ivar_w4'
+        }
+        
+    def train(self, path_to_data):
+        self.path_to_data = path_to_data
+        self.train_data = Catalog.read_table(self.path_to_data)
+        if self.debug:
+            print('Catalog was been reading. Shape: ', self.train_data.shape)
+        for column in self.flux_err:
+            if column in self.train_data:
+                if self.debug:
+                    print(f'Column {column}')
+                self.used_flux.add(column)
+                self._fit_for_flux(column)
+        del self.train_data
+        self.save()
+                   
+    def _fit_for_flux(self, flux_name):
+        err_name = self.flux_err[flux_name]
+        if self.debug:
+            print(f'In _fit {flux_name}, {err_name}')
+            
+        assert err_name in self.train_data, f'Beeeeedaaaaa! {err_name} not in train table'
+        flux, err = self._preprocessing(self.train_data[flux_name], self.train_data[err_name])
+        
+        model = {}
+        if self.type.value % 2:
+            if self.debug:
+                print('Fit KNN')
+                print(flux, flux.shape, err, err.shape)
+            model['knn'] = KNeighborsRegressor(self.n_neighbors).fit(flux, err) 
+        if self.type.value > 1:
+            if self.debug:
+                print('Fir RNR')
+            model['rnn'] = RadiusNeighborsRegressor().fit(flux, err)
+            model['normalize'] = 0.2 * np.max(flux) / 100
+        model['y'] = err
+        self._save_model(model, flux_name)
+        return self
+
+    def predict(self, data, dm=0, gauss_augm=True):
+        df = Catalog.read_table(data).copy()
+        for flux_name in self.used_flux:
+            if flux_name in df:
+                err_name = self.flux_err[flux_name]
+                assert err_name in df, f'Beeeeedaaaaa! {err_name} not in predict table'
+                if self.debug:
+                    print('before', df[flux_name], np.sum(df[flux_name]))
+                flux, err = self._preprocessing(df[flux_name], df[err_name])
+                if self.debug:
+                    print('preprocess', flux, np.sum(flux))
+                flux = flux * np.power(10, 0.4 * dm)
+
+                if dm != 0:
+                    if self.debug:
+                        self.plotik(flux / np.power(10, 0.4 * dm), err, flux_name + 'before')
+                    model = self._read_model(flux_name)
+                    err = self.neighbors(model, flux, sigma=err)
+                    if self.debug:
+                        self.plotik(flux, err, flux_name + 'after_tmp')
+                    
+                if gauss_augm:
+                    flux = np.array(list(map(self.gauss_flux, zip(flux, err))))
+                    if self.debug:
+                        self.plotik(flux, err, flux_name + 'after')
+                if self.debug:
+                    print('after', flux, np.sum(flux)) 
+                df.loc[:, flux_name], df.loc[:, err_name] = self._postrocessing(flux, err)
+                if self.debug:
+                    print('postprocess', df[flux_name], np.sum(df[flux_name])) 
+                
+        return df
+            
+    
+    def neighbors(self, model, x_input, n_neighbors=None, radius=None, sigma=1e-9): #TO
+        if self.debug:
+            print(f'Hi! I\'m neighbors of {x_input}')
+        x = x_input
+#         if isinstance(x_input, float) or isinstance(x_input, int):
+#             x = np.array([x_input])
+#         x = np.array(x, dtype=float)
+#         good_rows = ~(np.isnan(x) + np.isinf(x))
+        res = np.zeros(x.shape)
+        if not(n_neighbors is None):
+            self.n_neighbors = n_neighbors
+ 
+        if self.type == AugmType.KNN:
+            assert self.n_neighbors > 0
+            knb = model['knn'].kneighbors(x, n_neighbors=self.n_neighbors, return_distance=False)
+            if self.debug:
+                print('knn')
+            res_tmp = []
+            for x_loc, n, i in zip(x, knb, range(len(knb))):
+                res_tmp.append(np.random.choice(model['y'][n][:, 0])) ################
+            res = np.array(res_tmp)
+                
+        elif self.type == AugmType.RNN:
+            pass
+
+        elif self.type == AugmType.MIX:
+            assert self.n_neighbors > 0
+            for x_loc, s, i in zip(x, sigma, range(len(x))): # самая долгая часть - причина, почему обычные соседи могут быть лучше
+                if radius is None:
+                    r = np.max([0.2*x_loc, 3*s]) / model['normalize']
+                else:
+                    r = radius
+                rnb = model['rnn'].radius_neighbors(x_loc.reshape(-1, 1), radius=r, return_distance=False)[0]
+                if len(rnb) < self.n_neighbors:
+                    knb = model['knn'].kneighbors(x_loc.reshape(-1, 1), n_neighbors=self.n_neighbors, return_distance=False)[0]
+                    res[i] = np.random.choice(model['y'][knb][:, 0])
+                else:
+                    res[i] = np.random.choice(model['y'][rnb][:, 0])
+        return res
+
+    
+    def _preprocessing(self, flux, err):
+        if self.debug:
+            print('In _preprocessing')
+        if 'ivar' in err.name or 'Ivar' in err.name:
+            err = np.power(err, -0.5)
+            self.tmp_case = 1
+        elif re.findall('^ps_dw\dflux_ab$', err.name):
+            flux, err = flux.replace(-999, np.NaN), err.replace(-999, np.NaN)
+            self.tmp_case = 2
+        else:
+            flux, err = flux.replace(-999, np.NaN) / 3621e-9, err.replace(-999, np.NaN) / 3621e-9
+            self.tmp_case = 3
+
+        flux, err = np.array(flux.values, dtype=float), np.array(err.values, dtype=float)
+        self.tmp_index = np.isfinite(flux) & np.isfinite(err)
+            
+        return flux[self.tmp_index].reshape(-1, 1), err[self.tmp_index].reshape(-1, 1)
+        
+        
+    def _postrocessing(self, flux, err): #TO
+        if self.debug:
+            print('In _postprocessing')
+        if self.tmp_case == 1:
+            err = np.power(err, -2)
+        elif self.tmp_case == 3:
+            flux, err = flux * 3621e-9, err * 3621e-9
+            
+                
+        if self.debug:
+            print(self.tmp_index, self.tmp_index.shape)
+            
+        flux_res, err_res = np.full((len(self.tmp_index), 1), np.nan), np.full((len(self.tmp_index), 1), np.nan)
+        flux_res[self.tmp_index], err_res[self.tmp_index] = flux.reshape(-1, 1), err.reshape(-1, 1)
+        return flux_res, err_res
+        
+    @staticmethod
+    def gauss_flux(inputs):
+        mu, err = inputs
+        sigma = np.sqrt(err ** 2 + (mu * 0.03) ** 2)
+        return np.random.normal(mu, sigma)
+    
+    
+    def plotik(self, x, y, name=''):
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+        f, ax = plt.subplots(nrows = 1, ncols=1, figsize=(12, 8), sharex=True, sharey = True)
+        ax.set_title(name) 
+        ax.set_xlim([-1000, 30000])
+        ax.set_ylim([-10, 400])
+        ax.scatter(x, y, c='r')
+        if not os.path.exists(os.path.join(self.path_to_model, 'plt')):
+                os.mkdir(os.path.join(self.path_to_model, 'plt'))
+        f.savefig(os.path.join(self.path_to_model, 'plt', self.type.name+'_'+name+'.png'))
+    
+    def _save_model(self, model, flux_name):
+        if self.debug:
+            print(f'Self mimi model')
+        with open(os.path.join(self.path_to_model, self.type.name+'_'+flux_name), 'wb') as file:
+            pickle.dump(model, file) 
+            
+    def _read_model(self, flux_name):
+        if self.debug:
+            print(f'Read mimi model')
+        with open(os.path.join(self.path_to_model, self.type.name+'_'+flux_name), 'rb') as file:
+            return pickle.load(file)
+        
+    def save(self, path=None):
+        if self.debug:
+            print(f'Self me :)')
+        with open(os.path.join(path or self.path_to_model, self.type.name+'_CLASS'), 'wb') as file:
+            pickle.dump(self, file) 
+    
+    @staticmethod
+    def read(path, type_m=AugmType.KNN):
+        with open(os.path.join(path, type_m.name+'_CLASS'), 'rb') as file:
+            return pickle.load(file)
+
+## <<<<<<<
 
 class KNN_Augmentation:
     """
