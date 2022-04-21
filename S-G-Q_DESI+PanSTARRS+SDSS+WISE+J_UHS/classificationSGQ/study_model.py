@@ -305,7 +305,18 @@ def create_path(path):
     return 0    
 
 # Обучение общего классификатора по фолдам
-def train_classifier_SGQ(df, version='', folds=[0, 1], overviews=None, variants = ['not_j'], path_buf='./'):
+def train_classifier_SGQ(df, version='', folds=[0, 1], overviews=None, variants = ['not_j'], path_buf='./', check_exist=True,
+                        class_weight=None):
+    def get_cls_weights(n, w):
+        if w is None:
+            return None
+        norm = np.argmin(n)
+        res = {norm+1 : 1}
+        for i in set([1, 2, 3]) - set([norm+1]):
+            res[i] = (n[norm] * w[i-1]) / (n[i-1] * w[norm])
+        print(f'Res of get_cls_weights {res}')
+        return res
+    
     for fold in folds:
         for mod in variants:
             path = os.path.join(path_buf, f'{version}/models_{fold}/{mod}')
@@ -314,19 +325,25 @@ def train_classifier_SGQ(df, version='', folds=[0, 1], overviews=None, variants 
 
             for overview in (overviews or f[mod].keys()):
                 print(overview)
-
+                if check_exist and os.path.exists(os.path.join(path, f'model_{overview}.pkl')):
+                    print(f"{os.path.join(path, f'model_{overview}.pkl')} already exists")
+                    continue
                 if isinstance(fold, str):
                     df1 = df.loc[:, f[mod][overview]+['class']].dropna()
                 else:
-                    df1 = df.loc[df['fold'] == fold, f[mod][overview]+['class']].dropna()
-                print(len(f[mod][overview]))
+                    df1 = df.loc[df["fold"] == fold, f[mod][overview]+['class']].dropna()
+                print('Number of features', len(f[mod][overview]))
                 X, y = df1[f[mod][overview]].values, df1['class'].values
                 data, datat = data_preparation(X, y, test_size=0.2, c=500000)
-                print(data.shape, datat.shape)
+                print('Train', data.shape, " Test", datat.shape)
+                
 
                 X1, y1 = data[:, :-1], data[:, -1].astype('int')
                 X2, y2 = datat[:, :-1], datat[:, -1].astype('int')
                 robust = RobustScaler()
+                n = [np.sum(y1 == 1), np.sum(y1 == 2), np.sum(y1 == 3)]
+                print('Train ', np.sum(y1 == 1), np.sum(y1 == 2), np.sum(y1 == 3))
+                print('Test ', np.sum(y2 == 1), np.sum(y2 == 2), np.sum(y2 == 3))
 
                 X_train_norm = robust.fit_transform(X1)
                 X_test_norm = robust.transform(X2)
@@ -338,6 +355,7 @@ def train_classifier_SGQ(df, version='', folds=[0, 1], overviews=None, variants 
                 print(lgb_opt)
                 gb = lgb.LGBMClassifier( 
                                             **{
+                                                  'class_weight': get_cls_weights(n, class_weight),
                                                   'colsample_bytree': lgb_opt[0]['colsample_bytree'],
                                                   'min_child_samples': lgb_opt[0]['min_child_samples']+1,
                                                   #'min_child_weight': lgb_opt[0]['min_child_weight'],
@@ -358,7 +376,7 @@ def train_classifier_SGQ(df, version='', folds=[0, 1], overviews=None, variants 
                 joblib.dump(robust, os.path.join(path, f'{overview}_robust_for_gb.pkl'))
 
                 
-def train_classifier_Q(df, version='', folds=[0, 1], overviews=None, variants = ['not_j'], path_buf='./', weight=None):
+def train_classifier_Q(df, version='', folds=[0, 1], overviews=None, variants = ['not_j'], path_buf='./', weight=None, check_exist=True):
     for fold in folds:
         for mod in variants:
             path = os.path.join(path_buf, f'{version}/models_{fold}/{mod}')
@@ -367,6 +385,9 @@ def train_classifier_Q(df, version='', folds=[0, 1], overviews=None, variants = 
 
             for overview in (overviews or f[mod].keys()):
                 print(overview)
+                if check_exist and os.path.exists(os.path.join(path, f'model_{overview}.pkl')):
+                    print(f"{os.path.join(path, f'model_{overview}.pkl')} already exists")
+                    continue
                 if isinstance(fold, str):
                     df1 = df.loc[:, f[mod][overview]+['class']].dropna()
                 else:
@@ -467,18 +488,19 @@ class SGQModel:
         if cls:
             self.cls = cls
         
-    def train(self, df, overviews=None, weight=None):
+    def train(self, df, overviews=None, class_weight=None, check_exist=True):
         if self.binary:
-            train_classifier_Q(df, version=self.version, folds=self.folds, overviews=overviews, variants=self.variants, path=self.path, weight=weight)
+            train_classifier_Q(df, version=self.version, folds=self.folds, overviews=overviews, variants=self.variants, path_buf=self.path, weight=class_weight, check_exist=check_exist)
         else:
-            train_classifier_SGQ(df, version=self.version, folds=self.folds, overviews=overviews, variants=self.variants, path=self.path)
+            train_classifier_SGQ(df, version=self.version, folds=self.folds, overviews=overviews, variants=self.variants, path_buf=self.path, check_exist=check_exist, class_weight=class_weight)
             
-    def predict(self, input_data, train=False):
+    def predict(self, input_data, train=False, overviews=''):
         df = input_data.copy()
         for fold in self.folds:
             for mod in self.variants:
                 path = os.path.join(self.path, f'{self.version}/models_{fold}/{mod}')
-                for files in glob.glob(os.path.join(path, f'model_*.pkl')):
+
+                for files in glob.glob(os.path.join(path, f'model_*{overviews}.pkl')):
                     overview = files.split('/')[-1][6:-4]
                     model = joblib.load(os.path.join(path, f'model_{overview}.pkl'))
                     features = joblib.load(os.path.join(path, f'features_{overview}.pkl'))
@@ -497,12 +519,12 @@ class SGQModel:
                         df.loc[:, 'predict_'+overview] = predict
         return df
     
-    def predict_proba(self, input_data, train=False):
+    def predict_proba(self, input_data, train=False, overviews=''):
         df = input_data.copy()
         for fold in self.folds:
             for mod in self.variants:
                 path = os.path.join(self.path, f'{self.version}/models_{fold}/{mod}')
-                for files in glob.glob(os.path.join(path, f'model_*.pkl')):
+                for files in glob.glob(os.path.join(path, f'model_*{overviews}.pkl')):
                     overview = files.split('/')[-1][6:-4]
                     model = joblib.load(os.path.join(path, f'model_{overview}.pkl'))
                     features = joblib.load(os.path.join(path, f'features_{overview}.pkl'))
@@ -542,10 +564,28 @@ class SGQModel:
     
     
     def test_table(self, input_data, overview='sdssdr16+psdr2+all_decals8tr'):
-        def recall(pred, threshold=0.5):
-            a = 1 *(pred > threshold)
-            assert len(a) > 0, 'Ampty array'
-            return sum(a) / len(a)
+        def get_confM(y_true, y_pred, weight=[1390, 5714, 1395]):
+            from sklearn.metrics import confusion_matrix
+            matrix = confusion_matrix(y_true, y_pred)
+            for i, row in enumerate(matrix):
+                matrix[i] = row * (weight[i] / np.sum(row))
+                
+            print('matrix', matrix)
+            return matrix
+            
+        def write_confM(df, parameters):
+            for flax in parameters:
+                print(flax)
+                class_name = parameters[flax]['class_name']
+                data = df.loc[parameters[flax]['data']][[class_name, f'predict_{overview}']].dropna()
+                parameters[flax]['confM'] = get_confM(data[class_name], data[f'predict_{overview}'])
+                
+        def precision(confM, cls):
+            M = confM.T
+            return M[cls-1][cls-1] / np.sum(M[cls-1])
+        
+        def recall(confM, cls):
+            return confM[cls-1][cls-1] / np.sum(confM[cls-1])
 
         def recall_add(pred, threshold=0.5):
             a = 1 *(np.max(pred, axis=1) > threshold)
@@ -556,42 +596,55 @@ class SGQModel:
             a = 1 *(pred < threshold)
             assert len(a) > 0, 'Ampty array'
             return sum(a) / len(a)
+        
+        def add_for_data(rec, cl, df, parameters, columns):
+            cls = self.cls[cl]
+            for flax in parameters:
+                tmp0 = df.loc[parameters[flax]['data']]
+                confM = parameters[flax]['confM']
+                class_name = parameters[flax]['class_name']
+                tmp = tmp0.loc[tmp0[class_name] == cl][f'predict_proba_{cls}_{overview}'].dropna()
+                a = [flax,
+                     precision(confM, cl),
+                     recall(confM, cl), 
+                     roc_auc_score(1*(tmp0['class']==cl), tmp0[f'predict_proba_{cls}_{overview}']), 
+                     len(tmp)]
+                rec[cls] = rec[cls].append(pd.DataFrame([a], columns=columns), ignore_index=True)
 
         from sklearn.metrics import roc_curve, roc_auc_score
+        feature = 'decals8tr_z'
         
         if self.folds[0] == 'full':
             raise Exceptions("Can't")
-        df = self.predict_gaia(self.predict_proba(input_data, train=True))
-        rec = {}#1
-        columns = ['data', 'recall', 'roc-auc', 'count']
+        df = self.predict_gaia(self.predict_proba(self.predict(input_data, train=True, overviews=overview),
+                                                  train=True, overviews=overview))
+#         print(df)
+
+        parameters = {
+#             'GAIA': {
+#                 'data': (df['gaia_class'] > 0),
+#                 'class_name': 'gaia_class'
+#             },
+            'ALL': {
+                'data': (df['class'] == df['class']),
+                'class_name': 'class'
+            },
+#             f'{feature}<20': {
+#                 'data': (df[feature] < 20.),
+#                 'class_name': 'class'
+#             },
+            f'{feature}>20': {
+                'data': (df[feature] > 20.),
+                'class_name': 'class'
+            }  
+        }
+        write_confM(df, parameters)
+        rec = {}
+        columns = ['data', 'precision', 'recall', 'roc-auc', 'count']
         for cl in self.cls:
             cls = self.cls[cl]
             rec[cls] = pd.DataFrame([], columns=columns)
-            flax = ['GAIA', 'sdssdr16_i_psf<20', 'sdssdr16_i_psf>20']
-
-            tmp0 = df.loc[(df['sdssdr16_i_psf'] < 20.)&(df['gaia_class'] > 0)]
-            tmp = tmp0.loc[tmp0['gaia_class'] == cl][f'predict_proba_{cls}_{overview}'].dropna()
-            a = [flax[0], 
-                 recall(tmp), 
-                 roc_auc_score(1*(tmp0['gaia_class']==cl), tmp0[f'predict_proba_{cls}_{overview}']), 
-                 len(tmp)]
-            rec[cls] = rec[cls].append(pd.DataFrame([a], columns=columns), ignore_index=True)
-
-            tmp0 = df.loc[(df['sdssdr16_i_psf'] < 20.)]
-            tmp = tmp0.loc[tmp0['class'] == cl][f'predict_proba_{cls}_{overview}'].dropna()
-            a = [flax[1], 
-                 recall(tmp), 
-                 roc_auc_score(1*(tmp0['class']==cl), tmp0[f'predict_proba_{cls}_{overview}']), 
-                 len(tmp)]
-            rec[cls] = rec[cls].append(pd.DataFrame([a], columns=columns), ignore_index=True)
-
-            tmp0 = df.loc[(df['sdssdr16_i_psf'] > 20.)]
-            tmp = tmp0.loc[tmp0['class'] == cl][f'predict_proba_{cls}_{overview}'].dropna()
-            a = [flax[2], 
-                 recall(tmp), 
-                 roc_auc_score(1*(tmp0['class']==cl), tmp0[f'predict_proba_{cls}_{overview}']), 
-                 len(tmp)]
-            rec[cls] = rec[cls].append(pd.DataFrame([a], columns=columns), ignore_index=True)
+            add_for_data(rec, cl, df, parameters, columns)
 
         for i, r in rec.items():
             rec[i] = r.set_index(columns[0])
