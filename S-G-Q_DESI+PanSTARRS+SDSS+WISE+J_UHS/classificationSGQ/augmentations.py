@@ -37,7 +37,7 @@ train_predictions = 'train_aug_data_predictions.x1.gz_pkl'
 def plt_version(version, x, y, ax=None, path_to_files=None, color=None, title=None, norm=None, xlim=[-0.5, 7], ylim=[10, 28.5], s=1, alpha=0.8, cmap='cool', colorbar=True):
     import inspect
     if ax is None:
-        _, ax = plt.subplots()
+        _, ax = plt.subplots(figsize = (16, 12))
     if isinstance(version, str):
         if path_to_files is None:
             path_to_files= f'/home/nmalysheva/task/S-G-Q_DESI+PanSTARRS+SDSS+WISE+J_UHS/pzph/all_from_local/output_augm/preds_{version}/end'
@@ -64,9 +64,58 @@ def plt_version(version, x, y, ax=None, path_to_files=None, color=None, title=No
     gr = ax.scatter(x, y, c=color, norm=norm, s=s, cmap=cmap, alpha=alpha)
     ax.set_ylim(ylim)
     ax.set_xlim(xlim)
+    ax.grid()
     if colorbar:
         plt.colorbar(gr, ax=ax)
-    return norm
+        return norm
+    else:
+        return norm, gr
+
+def print_area_general_case(df, column_name='class', add_little=True, title='All'):
+    uniq = df[column_name].unique()
+    if isinstance(uniq[0], str):
+        d = {uniq[i]: i for i in range(len(uniq))}
+        color = df[column_name].apply(lambda x: d[x])
+    else:
+        color = df[column_name]
+        
+    x = lambda z: pd.Series(-2.5*(np.log10(z['ls_flux_r']) - np.log10(z['ls_flux_z'])), name='ls_r-z')
+    y = lambda z: pd.Series(-2.5*(np.log10(z['ls_flux_r']) - np.log10(z['ls_flux_w1'])), name='ls_r-w1')
+    
+    if add_little: 
+        gs_kw = dict(height_ratios=[len(uniq) - 0.5, 1])
+        fig, axd = plt.subplot_mosaic([['Big','Big','Big'],
+                                       [i for i in uniq]],
+                                  gridspec_kw=gs_kw, figsize=(13, 13),
+                                  constrained_layout=True)
+        norm, gr = plt_version(df, x, y, xlim=[-1.5, 5], ylim=[-4, 6], color=color,s=0.009,
+                               alpha=0.4, ax=axd['Big'], cmap='rainbow', title=title, colorbar=False)
+        for cls in uniq:
+            plt_version(df.loc[df[column_name]==cls], x, y, xlim=[-1.5, 5], ylim=[-4, 6],
+                        color=df.loc[df[column_name]==cls][column_name], s=0.0001, alpha=0.4,
+                        ax=axd[cls], cmap='rainbow', norm=norm, title=str(cls), colorbar=False)
+        fig.colorbar(gr, ax=list(axd.values()))
+    else:
+        norm, gr = plt_version(df, x, y, xlim=[-1.5, 5], ylim=[-4, 6], color=color, s=0.001, alpha=1,
+                               cmap=plt.cm.get_cmap('tab10', lut=len(uniq)), title=title, colorbar=False)
+        formatter = plt.FuncFormatter(lambda val, loc: uniq[val])
+        plt.colorbar(gr, ticks=np.arange(len(uniq)), format=formatter)
+
+def print_area(df, cls_column='class', title='All', s=0.009, alpha=0.4):
+    x = lambda z: pd.Series(-2.5*(np.log10(z['ls_flux_r']) - np.log10(z['ls_flux_z'])), name='ls_r-z')
+    y = lambda z: pd.Series(-2.5*(np.log10(z['ls_flux_r']) - np.log10(z['ls_flux_w1'])), name='ls_r-w1')
+    gs_kw = dict(height_ratios=[2.5, 1])
+    fig, axd = plt.subplot_mosaic([['Big','Big','Big'],
+                                   ['S', 'Q', 'G']],
+                              gridspec_kw=gs_kw, figsize=(13, 13),
+                              constrained_layout=True)
+    classs = {1:'S', 2:'Q', 3:'G'}
+    norm, gr = plt_version(df, x, y, xlim=[-1.5, 5], ylim=[-4, 6], color=df[cls_column], s=s, alpha=alpha, ax=axd['Big'], cmap='rainbow', title=title, colorbar=False)
+    
+    for cls in [1, 2, 3]:
+        plt_version(df.loc[df[cls_column]==cls], x, y, xlim=[-1.5, 5], ylim=[-4, 6], color=df.loc[df[cls_column]==cls][cls_column], s=s/90, alpha=alpha, ax=axd[classs[cls]], cmap='rainbow', norm=norm, title=classs[cls], colorbar=False)
+    fig.colorbar(gr, ax=list(axd.values()))
+        
 
 def IOU(train_data, input_data):
     import math
@@ -92,8 +141,9 @@ def KStest(target_data, input_data):
     D, p = kstest(target_data, input_data, N=100, alternative='two-sided')
     return (round(D, 3), round(p, 3))
 
-keys = ['nrow', 'objID', 'ra', 'dec', 'zspec', 'class', 'fold']
-f = ['sdss_psfFlux_u', 'sdss_psfFlux_g', 'sdss_psfFlux_r', 'sdss_psfFlux_i', 'sdss_psfFlux_z', 'sdss_cModelFlux_u', 'sdss_cModelFlux_g', 'sdss_cModelFlux_r', 'sdss_cModelFlux_i', 'sdss_cModelFlux_z', 'ps_gKronFlux', 'ps_rKronFlux', 'ps_iKronFlux', 'ps_zKronFlux', 'ps_yKronFlux', 'ps_gPSFFlux', 'ps_rPSFFlux', 'ps_iPSFFlux', 'ps_zPSFFlux', 'ps_yPSFFlux', 'ls_flux_g', 'ls_flux_r', 'ls_flux_z', 'ls_flux_w1', 'ls_flux_w2', 'ls_flux_w3', 'ls_flux_w4', 'sdss_psfFluxIvar_u', 'sdss_psfFluxIvar_g', 'sdss_psfFluxIvar_r', 'sdss_psfFluxIvar_i', 'sdss_psfFluxIvar_z', 'sdss_cModelFluxIvar_u', 'sdss_cModelFluxIvar_g', 'sdss_cModelFluxIvar_r', 'sdss_cModelFluxIvar_i', 'sdss_cModelFluxIvar_z', 'ps_gKronFluxErr', 'ps_rKronFluxErr', 'ps_iKronFluxErr', 'ps_zKronFluxErr', 'ps_yKronFluxErr', 'ps_gPSFFluxErr', 'ps_rPSFFluxErr', 'ps_iPSFFluxErr', 'ps_zPSFFluxErr', 'ps_yPSFFluxErr', 'ls_flux_ivar_g', 'ls_flux_ivar_r', 'ls_flux_ivar_z', 'ls_flux_ivar_w1', 'ls_flux_ivar_w2', 'ls_flux_ivar_w3', 'ls_flux_ivar_w4']
+keys = ['nrow', 'objID', 'ra', 'dec', 'zspec', 'class', 'subClass', 'fold']
+
+fluxs = ['sdss_psfFlux_u', 'sdss_psfFlux_g', 'sdss_psfFlux_r', 'sdss_psfFlux_i', 'sdss_psfFlux_z', 'sdss_cModelFlux_u', 'sdss_cModelFlux_g', 'sdss_cModelFlux_r', 'sdss_cModelFlux_i', 'sdss_cModelFlux_z', 'ps_gKronFlux', 'ps_rKronFlux', 'ps_iKronFlux', 'ps_zKronFlux', 'ps_yKronFlux', 'ps_gPSFFlux', 'ps_rPSFFlux', 'ps_iPSFFlux', 'ps_zPSFFlux', 'ps_yPSFFlux', 'ls_flux_g', 'ls_flux_r', 'ls_flux_z', 'ls_flux_w1', 'ls_flux_w2', 'ls_flux_w3', 'ls_flux_w4', 'sdss_psfFluxIvar_u', 'sdss_psfFluxIvar_g', 'sdss_psfFluxIvar_r', 'sdss_psfFluxIvar_i', 'sdss_psfFluxIvar_z', 'sdss_cModelFluxIvar_u', 'sdss_cModelFluxIvar_g', 'sdss_cModelFluxIvar_r', 'sdss_cModelFluxIvar_i', 'sdss_cModelFluxIvar_z', 'ps_gKronFluxErr', 'ps_rKronFluxErr', 'ps_iKronFluxErr', 'ps_zKronFluxErr', 'ps_yKronFluxErr', 'ps_gPSFFluxErr', 'ps_rPSFFluxErr', 'ps_iPSFFluxErr', 'ps_zPSFFluxErr', 'ps_yPSFFluxErr', 'ls_flux_ivar_g', 'ls_flux_ivar_r', 'ls_flux_ivar_z', 'ls_flux_ivar_w1', 'ls_flux_ivar_w2', 'ls_flux_ivar_w3', 'ls_flux_ivar_w4']
     
 mag = ['sdssdr16_u_psf', 'sdssdr16_g_psf', 'sdssdr16_r_psf', 'sdssdr16_i_psf', 'sdssdr16_z_psf', 'sdssdr16_u_cmodel', 'sdssdr16_g_cmodel', 'sdssdr16_r_cmodel', 'sdssdr16_i_cmodel', 'sdssdr16_z_cmodel', 'psdr2_g_psf', 'psdr2_r_psf', 'psdr2_i_psf', 'psdr2_z_psf', 'psdr2_y_psf', 'psdr2_g_kron', 'psdr2_r_kron', 'psdr2_i_kron', 'psdr2_z_kron', 'psdr2_y_kron', 'decals8tr_g', 'decals8tr_r', 'decals8tr_z', 'decals8tr_Lw1', 'decals8tr_Lw2', 'decals8tr_Lw3', 'decals8tr_Lw4']
 
@@ -141,9 +191,9 @@ def change_coord(df_before):
     
     
     
-    df_bef = df_before.loc[:, keys + ['sdss_objID', 'ps_objID', 'ls_objid', 'ps_w1flux', 'ps_w2flux','ps_dw1flux', 'ps_dw2flux', 'ls_ebv', 'ls_mw_transmission_g', 'ls_mw_transmission_r', 'ls_mw_transmission_z', 'ls_mw_transmission_w1', 'ls_mw_transmission_w2', 'ls_mw_transmission_w3', 'ls_mw_transmission_w4'] + f + mag + mag_agr + gaia_features]
+    df_bef = df_before.loc[:, keys + ['sdss_objID', 'ps_objID', 'ls_objid', 'ps_w1flux', 'ps_w2flux','ps_dw1flux', 'ps_dw2flux', 'ls_ebv', 'ls_mw_transmission_g', 'ls_mw_transmission_r', 'ls_mw_transmission_z', 'ls_mw_transmission_w1', 'ls_mw_transmission_w2', 'ls_mw_transmission_w3', 'ls_mw_transmission_w4'] + fluxs + mag + mag_agr + gaia_features]
     
-    for i in f:
+    for i in fluxs:
         if 'sdss' in i:
             before = i[5:]
         else:
@@ -352,9 +402,9 @@ class Augmentation:
             df.loc[:, 'dm'] = dm(len(df))
             if preprocessing_before_aug:
                 self._predict_for_flux(flux_statistic, df, gauss_augm)
-#                 print('before flux2mag', df[use_def_statistic])
+                print('before flux2mag', df[use_def_statistic])
                 df[use_def_statistic] = flux2mag(df[[flux_statistic]], df[[self.flux_err[flux_statistic]]], {flux_statistic: use_def_statistic})
-#                 print('after flux2mag', df[use_def_statistic])
+                print('after flux2mag', df[use_def_statistic])
                 df = df.loc[get_leave_indexes(df[use_def_statistic], self.return_data[use_def_statistic])]
 
            
@@ -597,23 +647,20 @@ class Augmentation:
         return castom_dm, itr, fp
     
 def read_after_augm(path, version):
+#     print(os.path.join(path, f'df_augg_cls_*{version}*_3.features.gz_pkl'))
+#     print(glob.glob(os.path.join(path, f'df_augg_cls_*{version}*_3.features.gz_pkl')))
     df = pd.concat(
         [pd.read_pickle(file, compression='gzip') for file in glob.glob(
-            os.path.join(path, f'df_aug_cls_*{version}*_3.features.gz_pkl'))], 
-        axis=1)
+            os.path.join(path, f'df_augg_cls_*{version}*_3.features.gz_pkl'))], 
+        axis=0)
     return df
 
-def predict_SGQ(model, input_data, features='decals8tr_z', version='one_gauss', path_buf='./', plot=False, return_data=True):
+def predict_SGQ(model, input_data, features='decals8tr_z', version='one_gauss', best_i=None, path_buf='./out_predict_SGQ', plot=False, return_data=True):
     try:
         os.mkdir(path_buf)
     except FileExistsError:
         pass
-    try:
-        os.mkdir(os.path.join(path_buf, '__buf__'))
-    except FileExistsError:
-        print(f"{os.path.join(path_buf, '__buf__')} exists")
-        
-    path_buf = os.path.join(path_buf, '__buf__')
+
     train_data = Catalog.read_table(model.path_to_data)
     input_data = Catalog.read_table(input_data)
     for cls in [1, 2, 3]:
@@ -626,10 +673,12 @@ def predict_SGQ(model, input_data, features='decals8tr_z', version='one_gauss', 
             sns.histplot(train_data[features], ax = ax, bins = 100, color = 'r', binrange=lim, stat="probability", element="step", fill=False)
             ax.set_title(f"CLASS = {cls}, IOU = {round(IOU(train_data[features], df[features]), 3)}")
             plt.show()
-        df_castom_dm = model.predict(df, use_def_statistic=features, type_model=version)
+        if best_i is None:
+            df_castom_dm = model.predict(df, use_def_statistic=features, type_model=version)
+        else:
+            df_castom_dm = model.predict(df, use_def_statistic=features, type_model=version, count_iter=best_i)
         df_castom_dm.to_pickle(os.path.join(path_buf, f'df_aug_cls_{cls}_{version}_1.gz_pkl'), compression='gzip')
         df_castom_dm.to_pickle(os.path.join(path_buf, f'df_aug_cls_{cls}_{version}_2.gz_pkl'), compression='gzip')
-
 
         catalog = Catalog(None, ('ra', 'dec'),
                       njobs=24, output_dir=path_buf,
@@ -672,7 +721,7 @@ def read_after_pzph_predict(path, version, features=[]):
         tmp = pd.concat(
             [pd.read_pickle(f, compression='gzip') for f in glob.glob(
                 os.path.join(path, f"*{file.split('/')[-1].split('.')[-3]}*.gz_pkl"))], 
-            axis=1)[keys + features + for_clf + preds]
+            axis=1)[list(set(keys + features + for_clf + fluxs + gaia_features + preds))]
         df = pd.concat([df, tmp], axis=0)
     return df
 
@@ -695,22 +744,23 @@ def pzph_predict_SGQ(version='one_gauss', path_buf='__buf__',
                              f'df_augg_cls_{cls}_{version}_3_{fname}.features.gz_pkl'), 
                 compression='gzip')
     data_path = os.path.join(path_buf, f'preds_{version}')
-    files = glob.glob(os.path.join(path_buf, 
-                             f'df_augg_cls_*_{version}_3_*.features.gz_pkl'))
+    files = glob.glob(os.path.join(data_path, 
+                             f'df_augg_cls_*{version}*.features.gz_pkl'))
+    print(list(files))
     print('predict')
     predict(datasets_files=files, modelsIds=modelsIds, modelsSeries=modelsSeries, njobs=njobs)
     
     try:
-        os.mkdir(os.path.join(path_buf, 'end'))
+        os.mkdir(os.path.join(data_path, 'end'))
     except FileExistsError:
         pass
     print('assemble_and_analyze_results')
     for cls in [1, 2, 3]:
-        for file in glob.glob(os.path.join(path_buf, f'df_augg_cls_{cls}*{version}*features.gz_pkl')):
-            assemble_and_analyze_results(path_buf, 
-                                         os.path.join(path_buf, 'end'), 
+        for file in glob.glob(os.path.join(data_path, f'df_augg_cls_{cls}*{version}*features.gz_pkl')):
+            assemble_and_analyze_results(data_path, 
+                                         os.path.join(data_path, 'end'), 
                                          models_series=modelsSeries, 
                                          file_name=file.split('/')[-1].split('.')[0])
     
-    return read_after_pzph_predict(os.path.join(path_buf, 'end'), version)  
+    return read_after_pzph_predict(os.path.join(data_path, 'end'), version)  
   
